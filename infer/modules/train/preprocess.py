@@ -88,9 +88,12 @@ class PreProcess:
         return base_name in self.existing_slice_bases
 
     def _accelerated_audio_pair(self, tmp_audio):
-        audio = torch.from_numpy(np.asarray(tmp_audio, dtype=np.float32)).to(self.device)
+        source = np.asarray(tmp_audio, dtype=np.float32)
+        if source.size == 0:
+            return np.zeros(1, dtype=np.float32), np.zeros(1, dtype=np.float32), 0.0
+        audio = torch.from_numpy(source).to(self.device)
         tmp_max = torch.abs(audio).max()
-        tmp_max_value = float(tmp_max.item()) if tmp_max.numel() else 0.0
+        tmp_max_value = float(tmp_max.item())
         if tmp_max_value <= 0.0:
             zeros = np.zeros_like(tmp_audio, dtype=np.float32)
             target_len = max(1, int(round(len(tmp_audio) * 16000 / self.sr)))
@@ -198,7 +201,10 @@ class PreProcess:
                 for name in sorted(list(os.listdir(inp_root)))
             ]
             if self.use_torch_accel:
-                println("Using %s-accelerated preprocess in single-process mode" % self.device)
+                println(
+                    "Using %s-accelerated preprocess in single-process mode"
+                    % self.device.type
+                )
                 self.pipeline_mp(infos)
             elif noparallel:
                 for i in range(n_p):
