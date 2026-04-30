@@ -20,6 +20,9 @@ from random import randint, shuffle
 
 import torch
 
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
+
 try:
     import intel_extension_for_pytorch as ipex  # pylint: disable=import-error, unused-import
 
@@ -150,10 +153,12 @@ class EpochRecorder:
 
 def main():
     if _use_mps:
-        n_gpus = 1
+        logger = utils.get_logger(hps.model_dir)
         print("Using MPS (Apple Silicon) for training")
-    else:
-        n_gpus = torch.cuda.device_count()
+        run(0, 1, hps, logger)
+        return
+
+    n_gpus = torch.cuda.device_count()
     if n_gpus < 1:
         # patch to unblock people without gpus. there is probably a better way.
         print("NO GPU DETECTED: falling back to CPU - this may take a while")
@@ -183,24 +188,25 @@ def run(rank, n_gpus, hps: utils.HParams, logger: logging.Logger):
         writer = SummaryWriter(log_dir=hps.model_dir)
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.model_dir, "eval"))
 
-    try:
-        dist.init_process_group(
-            backend=(
-                "gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl"
-            ),
-            init_method="env://",
-            world_size=n_gpus,
-            rank=rank,
-        )
-    except:
-        dist.init_process_group(
-            backend=(
-                "gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl"
-            ),
-            init_method="env://?use_libuv=False",
-            world_size=n_gpus,
-            rank=rank,
-        )
+    if not _use_mps:
+        try:
+            dist.init_process_group(
+                backend=(
+                    "gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl"
+                ),
+                init_method="env://",
+                world_size=n_gpus,
+                rank=rank,
+            )
+        except:
+            dist.init_process_group(
+                backend=(
+                    "gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl"
+                ),
+                init_method="env://?use_libuv=False",
+                world_size=n_gpus,
+                rank=rank,
+            )
     torch.manual_seed(hps.train.seed)
     if _use_mps:
         device = torch.device("mps")
@@ -229,16 +235,18 @@ def run(rank, n_gpus, hps: utils.HParams, logger: logging.Logger):
         collate_fn = TextAudioCollateMultiNSFsid()
     else:
         collate_fn = TextAudioCollate()
-    train_loader = DataLoader(
-        train_dataset,
-        num_workers=4,
+    train_loader_kwargs = dict(
+        dataset=train_dataset,
+        num_workers=0 if _use_mps else 4,
         shuffle=False,
         pin_memory=not _use_mps,
         collate_fn=collate_fn,
         batch_sampler=train_sampler,
-        persistent_workers=True,
-        prefetch_factor=8,
+        persistent_workers=not _use_mps,
     )
+    if not _use_mps:
+        train_loader_kwargs["prefetch_factor"] = 8
+    train_loader = DataLoader(**train_loader_kwargs)
     mdl = hps.copy().model
     del mdl.use_spectral_norm
     if hps.if_f0 == 1:

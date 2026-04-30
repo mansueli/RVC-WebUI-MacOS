@@ -16,15 +16,21 @@ noparallel = sys.argv[5] == "True"
 per = float(sys.argv[6])
 # Optional argument: when True, re-process all files even if slices already exist.
 force = len(sys.argv) > 7 and sys.argv[7] == "True"
+device_name = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else "auto"
 import os
 import traceback
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
-from infer.lib.audio import load_audio, float_np_array_to_wav_buf, save_audio
+from infer.lib.audio import load_audio, save_audio
 from infer.lib.slicer2 import Slicer
 
 f = open("%s/preprocess.log" % exp_dir, "a+")
+
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
 
 def println(strr):
@@ -33,8 +39,22 @@ def println(strr):
     f.flush()
 
 
+def choose_device(name):
+    if name == "mps" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    if name == "cuda" and torch.cuda.is_available():
+        return torch.device("cuda")
+    if name == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 class PreProcess:
-    def __init__(self, sr, exp_dir, per=3.7):
+    def __init__(self, sr, exp_dir, per=3.7, device="auto"):
         self.slicer = Slicer(
             sr=sr,
             threshold=-42,
@@ -50,6 +70,8 @@ class PreProcess:
         self.tail = self.per + self.overlap
         self.max = 0.9
         self.alpha = 0.75
+        self.device = choose_device(device)
+        self.use_torch_accel = self.device.type in ("mps", "cuda")
         self.exp_dir = exp_dir
         self.gt_wavs_dir = "%s/0_gt_wavs" % exp_dir
         self.wavs16k_dir = "%s/1_16k_wavs" % exp_dir
@@ -65,32 +87,65 @@ class PreProcess:
     def has_existing_slices(self, base_name):
         return base_name in self.existing_slice_bases
 
+    def _accelerated_audio_pair(self, tmp_audio):
+        source = np.asarray(tmp_audio, dtype=np.float32)
+        if source.size == 0:
+            return np.zeros(1, dtype=np.float32), np.zeros(1, dtype=np.float32), 0.0
+        audio = torch.from_numpy(source).to(self.device)
+        tmp_max = torch.abs(audio).max()
+        tmp_max_value = float(tmp_max.item())
+        if tmp_max_value <= 0.0:
+            zeros = np.zeros_like(tmp_audio, dtype=np.float32)
+            target_len = max(1, int(round(len(tmp_audio) * 16000 / self.sr)))
+            return zeros, np.zeros(target_len, dtype=np.float32), tmp_max_value
+        audio = (audio / tmp_max * (self.max * self.alpha)) + (1 - self.alpha) * audio
+        target_len = max(1, int(round(audio.shape[0] * 16000 / self.sr)))
+        audio16k = F.interpolate(
+            audio.view(1, 1, -1),
+            size=target_len,
+            mode="linear",
+            align_corners=False,
+        ).view(-1)
+        return (
+            audio.detach().cpu().numpy().astype(np.float32, copy=False),
+            audio16k.detach().cpu().numpy().astype(np.float32, copy=False),
+            tmp_max_value,
+        )
+
     def norm_write(self, tmp_audio, idx0, idx1):
-        tmp_max = np.abs(tmp_audio).max()
+        if self.use_torch_accel:
+            norm_audio, wav16k, tmp_max = self._accelerated_audio_pair(tmp_audio)
+        else:
+            tmp_max = np.abs(tmp_audio).max()
+            norm_audio = None
+            wav16k = None
         if tmp_max > 2.5:
             print("%s-%s-%s-filtered" % (idx0, idx1, tmp_max))
             return
-        tmp_audio = (tmp_audio / tmp_max * (self.max * self.alpha)) + (
-            1 - self.alpha
-        ) * tmp_audio
+        if norm_audio is None:
+            if tmp_max <= 0:
+                norm_audio = np.zeros_like(tmp_audio, dtype=np.float32)
+            else:
+                norm_audio = (tmp_audio / tmp_max * (self.max * self.alpha)) + (
+                    1 - self.alpha
+                ) * tmp_audio
         save_audio(
             "%s/%s_%s.wav" % (self.gt_wavs_dir, idx0, idx1),
-            tmp_audio,
+            norm_audio,
             self.sr,
             f32=True,
         )
-        with open("%s/%s_%s.wav" % (self.wavs16k_dir, idx0, idx1), "wb") as f:
-            f.write(
-                float_np_array_to_wav_buf(
-                    load_audio(
-                        float_np_array_to_wav_buf(tmp_audio, self.sr, f32=True),
-                        sr=16000,
-                        format="wav",
-                    ),
-                    16000,
-                    True,
-                ).getbuffer()
+        if wav16k is None:
+            wav16k = load_audio(
+                "%s/%s_%s.wav" % (self.gt_wavs_dir, idx0, idx1),
+                sr=16000,
             )
+        save_audio(
+            "%s/%s_%s.wav" % (self.wavs16k_dir, idx0, idx1),
+            wav16k,
+            16000,
+            f32=True,
+        )
 
     def pipeline(self, path):
         try:
@@ -145,7 +200,13 @@ class PreProcess:
                 ("%s/%s" % (inp_root, name), name)
                 for name in sorted(list(os.listdir(inp_root)))
             ]
-            if noparallel:
+            if self.use_torch_accel:
+                println(
+                    "Using %s-accelerated preprocess in single-process mode"
+                    % self.device.type
+                )
+                self.pipeline_mp(infos)
+            elif noparallel:
                 for i in range(n_p):
                     self.pipeline_mp(infos[i::n_p])
             else:
@@ -162,12 +223,13 @@ class PreProcess:
             println("Fail. %s" % traceback.format_exc())
 
 
-def preprocess_trainset(inp_root, sr, n_p, exp_dir, per):
-    pp = PreProcess(sr, exp_dir, per)
+def preprocess_trainset(inp_root, sr, n_p, exp_dir, per, device="auto"):
+    pp = PreProcess(sr, exp_dir, per, device=device)
     println("start preprocess")
+    println("preprocess device: %s" % pp.device)
     pp.pipeline_mp_inp_dir(inp_root, n_p)
     println("end preprocess")
 
 
 if __name__ == "__main__":
-    preprocess_trainset(inp_root, sr, n_p, exp_dir, per)
+    preprocess_trainset(inp_root, sr, n_p, exp_dir, per, device_name)

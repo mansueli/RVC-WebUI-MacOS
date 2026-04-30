@@ -476,7 +476,7 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None):
     f = open(log_file_path, "w")
     f.close()
     force_preprocess = str(preprocess_mode) == i18n("Full rebuild (reprocess all files)")
-    cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s" %s %.1f %s' % (
+    cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s" %s %.1f %s "%s"' % (
         config.python_cmd,
         trainset_dir,
         sr,
@@ -485,6 +485,7 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None):
         config.noparallel,
         config.preprocess_per,
         "True" if force_preprocess else "False",
+        config.device,
     )
     logger.info("Execute: " + cmd)
     # , stdin=PIPE, stdout=PIPE,stderr=PIPE,cwd=now_dir
