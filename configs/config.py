@@ -170,12 +170,12 @@ class Config:
             if self.gpu_mem <= 4:
                 self.preprocess_per = 3.0
         elif self.has_mps():
-            logger.info("No supported Nvidia GPU found")
+            logger.info("Apple MPS (Metal Performance Shaders) detected, using MPS device (fp32)")
             self.device = self.instead = "mps"
             self.is_half = False
             self.use_fp32_config()
         else:
-            logger.info("No supported Nvidia GPU found")
+            logger.info("No GPU detected, falling back to CPU")
             self.device = self.instead = "cpu"
             self.is_half = False
             self.use_fp32_config()

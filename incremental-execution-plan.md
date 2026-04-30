@@ -38,7 +38,7 @@ The backlog should be executed with the following constraints.
 4. Treat macOS behavior as a first-class target in this fork.
 5. Keep research work isolated from mainline maintenance until baseline stability is established.
 
-## Phase 0: Planning And Baseline Capture
+## Phase 0: Planning And Baseline Capture ✅ DONE
 
 Objective:
 
@@ -64,7 +64,13 @@ Exit criteria:
 - the repo has one planning document instead of a speculative research report
 - the basic operator flows and current risks are documented in actionable terms
 
-## Phase 1: Startup, Assets, And Device Reliability
+## Phase 1: Startup, Assets, And Device Reliability ✅ DONE
+
+**Completed changes:**
+- `web.py`: added `logging.basicConfig(INFO)` so device/asset startup messages are visible; fixed silent asset-check failure (typo + added actionable `--update` guidance)
+- `configs/config.py`: replaced misleading `"No supported Nvidia GPU found"` in the MPS path with `"Apple MPS detected, using MPS device (fp32)"` and clarified CPU fallback message
+- `run.sh`: added Python version and startup banners (`Python X.Y.Z ready.` / `Starting RVC WebUI...`)
+- `.github/workflows/unitest.yml`: restricted matrix to Python 3.10 only; added config-bootstrap smoke test step
 
 Objective:
 
@@ -105,7 +111,7 @@ Exit criteria:
 - missing resources produce clear action-oriented errors
 - device selection is visible and matches actual runtime behavior
 
-## Phase 2: Test And CI Hardening
+## Phase 2: Test And CI Hardening ← NEXT
 
 Objective:
 
@@ -240,11 +246,11 @@ Rules for entering active implementation:
 
 ## Prioritized Backlog
 
-P0:
+P0: ✅ DONE
 
-- audit and harden startup flow across `run.sh`, `web.py`, and `configs/config.py`
-- make asset and path failure modes explicit
-- add launch-critical smoke coverage to CI
+- ~~audit and harden startup flow across `run.sh`, `web.py`, and `configs/config.py`~~
+- ~~make asset and path failure modes explicit~~
+- ~~add launch-critical smoke coverage to CI~~
 
 P1:
 

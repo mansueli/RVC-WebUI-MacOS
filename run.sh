@@ -41,6 +41,7 @@ if [[ ! -d "${venv_path}" ]]; then
 fi
 echo "Activating venv..."
 source "${venv_path}/bin/activate"
+echo "Python $(python --version) ready."
 
 venv_python_version="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 if [[ "${venv_python_version}" != "${required_python}" ]]; then
@@ -62,4 +63,5 @@ if [[ "${AUTO_DOWNLOAD_ASSETS:-0}" == "1" ]]; then
 fi
 
 # Run the main script
+echo "Starting RVC WebUI..."
 python web.py --pycmd python

@@ -25,6 +25,9 @@ import torch, platform
 import numpy as np
 import logging
 
+# Configure root logger early so INFO startup messages (device, assets) are visible.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 # Suppress noisy DEBUG loggers BEFORE importing gradio/PIL so the
 # suppression is in place when PIL loads its image plugins.
 logging.getLogger("numba").setLevel(logging.WARNING)
@@ -77,7 +80,11 @@ if not config.nocheck:
         if config.update:
             download_all_assets(tmpdir=tmp)
             if not check_all_assets(update=config.update):
-                logging.error("counld not satisfy all assets needed.")
+                logging.error(
+                    "Could not satisfy all required assets.\n"
+                    "Run with --update to download missing files, or set "
+                    "AUTO_DOWNLOAD_ASSETS=1 before running run.sh."
+                )
                 exit(1)
 
 if config.dml == True:
