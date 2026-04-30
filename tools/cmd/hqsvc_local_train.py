@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import random
 import time
 from pathlib import Path
@@ -44,6 +43,10 @@ try:
     import soundfile as sf
 except Exception:  # pragma: no cover
     sf = None
+
+
+_STFT_WINDOW_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+_MEL_FILTER_CACHE: dict[tuple[int, int, int, str], torch.Tensor] = {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,8 +140,45 @@ def random_crop(w: np.ndarray, n: int) -> np.ndarray:
     return w[start : start + n]
 
 
+def _cache_key(device: torch.device) -> str:
+    index = getattr(device, "index", None)
+    return "%s:%s" % (device.type, index if index is not None else -1)
+
+
+def get_hann_window(n_fft: int, device: torch.device) -> torch.Tensor:
+    key = (n_fft, _cache_key(device))
+    win = _STFT_WINDOW_CACHE.get(key)
+    if win is None:
+        win = torch.hann_window(n_fft, device=device)
+        _STFT_WINDOW_CACHE[key] = win
+    return win
+
+
+def get_mel_filter(
+    sample_rate: int,
+    n_fft: int,
+    mel_bins: int,
+    device: torch.device,
+) -> torch.Tensor:
+    key = (sample_rate, n_fft, mel_bins, _cache_key(device))
+    mel = _MEL_FILTER_CACHE.get(key)
+    if mel is None:
+        if librosa is not None:
+            mel_np = librosa.filters.mel(
+                sr=sample_rate,
+                n_fft=n_fft,
+                n_mels=mel_bins,
+                dtype=np.float32,
+            )
+        else:
+            mel_np = np.eye(mel_bins, (n_fft // 2) + 1, dtype=np.float32)
+        mel = torch.from_numpy(mel_np).to(device=device, dtype=torch.float32)
+        _MEL_FILTER_CACHE[key] = mel
+    return mel
+
+
 def stft_mag(x: torch.Tensor, n_fft: int, hop: int) -> torch.Tensor:
-    win = torch.hann_window(n_fft, device=x.device)
+    win = get_hann_window(n_fft, x.device)
     s = torch.stft(
         x,
         n_fft=n_fft,
@@ -152,7 +192,7 @@ def stft_mag(x: torch.Tensor, n_fft: int, hop: int) -> torch.Tensor:
 
 def f0_autocorr(x: torch.Tensor, sr: int, fmin: float = 60.0, fmax: float = 900.0) -> torch.Tensor:
     # x: [B, T]
-    b, t = x.shape
+    _, t = x.shape
     min_lag = max(1, int(sr / fmax))
     max_lag = max(min_lag + 1, int(sr / fmin))
     frame = 1024
@@ -164,26 +204,45 @@ def f0_autocorr(x: torch.Tensor, sr: int, fmin: float = 60.0, fmax: float = 900.
     frames = frames - frames.mean(dim=-1, keepdim=True)
     energy = (frames * frames).sum(dim=-1, keepdim=True) + 1e-7
     frames = frames / torch.sqrt(energy)
-    corrs = []
-    for lag in range(min_lag, max_lag):
-        a = frames[..., :-lag]
-        b2 = frames[..., lag:]
-        corrs.append((a * b2).mean(dim=-1))
-    corr = torch.stack(corrs, dim=-1)
+    fft_size = 1 << ((2 * frame - 1).bit_length())
+    spec = torch.fft.rfft(frames, n=fft_size, dim=-1)
+    corr = torch.fft.irfft(spec * torch.conj(spec), n=fft_size, dim=-1)[..., min_lag:max_lag]
     best = corr.argmax(dim=-1).float() + float(min_lag)
     f0 = float(sr) / best
     return f0
 
 
-def mel_stats(x: np.ndarray, sr: int, mel_bins: int, hop: int) -> np.ndarray:
+def mel_stats_tensor(
+    x: torch.Tensor,
+    sr: int,
+    mel_bins: int,
+    hop: int,
+    n_fft: int = 1024,
+) -> torch.Tensor:
+    if x.dim() == 1:
+        x = x.unsqueeze(0)
+
     if librosa is None:
-        # Fallback: rough stats in waveform domain
-        return np.array([float(np.mean(x)), float(np.std(x))], dtype=np.float32)
-    mel = librosa.feature.melspectrogram(y=x, sr=sr, n_mels=mel_bins, hop_length=hop)
-    logm = np.log(np.maximum(mel, 1e-6))
-    mu = logm.mean(axis=1)
-    sigma = logm.std(axis=1)
-    return np.concatenate([mu, sigma], axis=0).astype(np.float32)
+        mu = x.mean(dim=-1, keepdim=True)
+        sigma = x.std(dim=-1, keepdim=True)
+        return torch.cat([mu, sigma], dim=-1)
+
+    win = get_hann_window(n_fft, x.device)
+    spec = torch.stft(
+        x,
+        n_fft=n_fft,
+        hop_length=hop,
+        win_length=n_fft,
+        window=win,
+        return_complex=True,
+    )
+    power = spec.abs().pow(2.0)
+    mel_filter = get_mel_filter(sr, n_fft, mel_bins, x.device)
+    mel = torch.matmul(mel_filter.unsqueeze(0), power)
+    logm = torch.log(torch.clamp(mel, min=1e-6))
+    mu = logm.mean(dim=-1)
+    sigma = logm.std(dim=-1)
+    return torch.cat([mu, sigma], dim=-1)
 
 
 def main() -> int:
@@ -220,11 +279,20 @@ def main() -> int:
     model_dir = exp_dir / "hqsvc_local"
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    target_stats_np = np.stack(
-        [mel_stats(random_crop(w, seg_n), args.sample_rate, args.mel_bins, args.hop_feature) for w in wavs[: min(64, len(wavs))]],
+    target_batch = np.stack(
+        [
+            random_crop(w, seg_n)
+            for w in wavs[: min(64, len(wavs))]
+        ],
         axis=0,
     )
-    target_stats = torch.from_numpy(target_stats_np).to(device).mean(dim=0, keepdim=True)
+    target_batch_t = torch.from_numpy(target_batch).to(device=device, dtype=torch.float32)
+    target_stats = mel_stats_tensor(
+        target_batch_t,
+        args.sample_rate,
+        args.mel_bins,
+        args.hop_feature,
+    ).mean(dim=0, keepdim=True)
 
     t0 = time.time()
     while global_step < args.steps:
@@ -257,12 +325,13 @@ def main() -> int:
         f0_x = f0_autocorr(x1, args.sample_rate)
         l_f0 = F.l1_loss(torch.log(f0_y + 1e-6), torch.log(f0_x + 1e-6))
 
-        # L_spk: timbre-statistics match to dataset centroid.
-        y_cpu = y1.detach().float().cpu().numpy()
-        y_stats_np = np.stack(
-            [mel_stats(v, args.sample_rate, args.mel_bins, args.hop_feature) for v in y_cpu], axis=0
+        # L_spk: timbre-statistics match to dataset centroid, kept on-device.
+        y_stats = mel_stats_tensor(
+            y1,
+            args.sample_rate,
+            args.mel_bins,
+            args.hop_feature,
         )
-        y_stats = torch.from_numpy(y_stats_np).to(device)
         l_spk = F.l1_loss(y_stats.mean(dim=0, keepdim=True), target_stats)
 
         loss = 1.0 * l_ddsp + 0.2 * l_diff + 0.1 * l_spk + 0.2 * l_f0

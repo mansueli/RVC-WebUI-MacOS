@@ -25,6 +25,14 @@ try:
 except Exception:  # pragma: no cover
     librosa = None
 
+try:
+    import torch
+except Exception:  # pragma: no cover
+    torch = None
+
+
+_WINDOW_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CPU Ying-style vocal preprocessing")
@@ -32,10 +40,94 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", required=True)
     p.add_argument("--target-sr", type=int, default=44100)
     p.add_argument("--top-db", type=float, default=35.0)
+    p.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     return p.parse_args()
 
 
-def process_file(src: Path, dst: Path, target_sr: int, top_db: float) -> None:
+def choose_device(name: str):
+    if torch is None:
+        return None
+    if name == "cuda":
+        return torch.device("cuda")
+    if name == "mps":
+        return torch.device("mps")
+    if name == "cpu":
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _cache_key(device: torch.device) -> str:
+    index = getattr(device, "index", None)
+    return "%s:%s" % (device.type, index if index is not None else -1)
+
+
+def get_hann_window(n_fft: int, device: torch.device) -> torch.Tensor:
+    key = (n_fft, _cache_key(device))
+    window = _WINDOW_CACHE.get(key)
+    if window is None:
+        window = torch.hann_window(n_fft, device=device)
+        _WINDOW_CACHE[key] = window
+    return window
+
+
+def process_file_torch(
+    src: Path,
+    dst: Path,
+    target_sr: int,
+    top_db: float,
+    device: torch.device,
+) -> None:
+    wav, sr = sf.read(str(src), always_2d=False)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    wav = wav.astype(np.float32)
+    if sr != target_sr:
+        if librosa is None:
+            raise RuntimeError("librosa is required for resampling when sample rate differs")
+        wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+
+    x = torch.from_numpy(wav).to(device=device, dtype=torch.float32)
+    n_fft = 2048
+    hop = 512
+    window = get_hann_window(n_fft, device)
+    spec = torch.stft(
+        x,
+        n_fft=n_fft,
+        hop_length=hop,
+        win_length=n_fft,
+        window=window,
+        return_complex=True,
+    )
+    mag = spec.abs()
+
+    # Approximate sustained vocal emphasis using temporal smoothing.
+    harmonic_mag = torch.nn.functional.avg_pool1d(
+        mag.transpose(0, 1), kernel_size=9, stride=1, padding=4
+    ).transpose(0, 1)
+
+    ref = harmonic_mag.amax(dim=-1, keepdim=True).clamp_min(1e-6)
+    db = 20.0 * torch.log10(harmonic_mag / ref)
+    mask = torch.sigmoid((db + top_db) / 6.0)
+    filtered = spec * mask
+    out = torch.istft(
+        filtered,
+        n_fft=n_fft,
+        hop_length=hop,
+        win_length=n_fft,
+        window=window,
+        length=x.shape[0],
+    )
+    peak = out.abs().amax().clamp_min(1e-7)
+    out = 0.95 * out / peak
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(dst), out.detach().cpu().numpy().astype(np.float32), target_sr)
+
+
+def process_file_librosa(src: Path, dst: Path, target_sr: int, top_db: float) -> None:
     y, sr = librosa.load(str(src), sr=target_sr, mono=True)
 
     # Harmonic-percussive separation keeps sustained components typical of vocals.
@@ -59,9 +151,9 @@ def process_file(src: Path, dst: Path, target_sr: int, top_db: float) -> None:
 def main() -> int:
     args = parse_args()
 
-    if np is None or sf is None or librosa is None:
+    if np is None or sf is None:
         print("[error] Missing dependencies for CPU Ying preprocessing.")
-        print("[hint] Install: numpy, soundfile, librosa")
+        print("[hint] Install: numpy, soundfile")
         return 2
 
     source_dir = Path(args.source_dir).resolve()
@@ -80,7 +172,14 @@ def main() -> int:
 
     for src in files:
         dst = output_dir / (src.stem + ".wav")
-        process_file(src, dst, args.target_sr, args.top_db)
+        device = choose_device(args.device)
+        if device is not None:
+            process_file_torch(src, dst, args.target_sr, args.top_db, device)
+        elif librosa is not None:
+            process_file_librosa(src, dst, args.target_sr, args.top_db)
+        else:
+            print("[error] Need either torch or librosa for preprocessing.")
+            return 2
         print("[done]", dst)
 
     print("[done] CPU Ying-style preprocessing completed:", output_dir)
