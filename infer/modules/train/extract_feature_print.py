@@ -38,13 +38,19 @@ import torch.nn.functional as F
 # files only; all other calls fall through to the default.
 _torch_load_orig = torch.load
 
-def _torch_load_compat(f, map_location=None, pickle_module=None, weights_only=None, **kw):
-    _path = str(f) if not hasattr(f, 'read') else getattr(f, 'name', '')
-    if weights_only is None and _path.endswith('.pt'):
+
+def _torch_load_compat(
+    f, map_location=None, pickle_module=None, weights_only=None, **kw
+):
+    _path = str(f) if not hasattr(f, "read") else getattr(f, "name", "")
+    if weights_only is None and _path.endswith(".pt"):
         weights_only = False
     if weights_only is not None:
-        return _torch_load_orig(f, map_location=map_location, weights_only=weights_only, **kw)
+        return _torch_load_orig(
+            f, map_location=map_location, weights_only=weights_only, **kw
+        )
     return _torch_load_orig(f, map_location=map_location, **kw)
+
 
 torch.load = _torch_load_compat
 
@@ -140,7 +146,10 @@ else:
         try:
             if file.endswith(".wav"):
                 wav_path = "%s/%s" % (wavPath, file)
-                out_path = "%s/%s" % (outPath, file.replace("wav", "npy"))  # intentional: replaces all occurrences to match filelist logic
+                out_path = "%s/%s" % (
+                    outPath,
+                    file.replace("wav", "npy"),
+                )  # intentional: replaces all occurrences to match filelist logic
 
                 if os.path.exists(out_path):
                     continue

@@ -41,9 +41,10 @@ _use_mps = not torch.cuda.is_available() and torch.backends.mps.is_available()
 # are always used in no-op mode (enabled=False).  We still fix the warnings
 # so the log stays clean.
 import functools as _functools
-if not (hasattr(torch, 'xpu') and torch.xpu.is_available()):
+
+if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
     _amp_device = "cuda" if torch.cuda.is_available() else "cpu"
-    autocast   = _functools.partial(torch.amp.autocast, _amp_device)
+    autocast = _functools.partial(torch.amp.autocast, _amp_device)
     GradScaler = _functools.partial(torch.amp.GradScaler, _amp_device)
 
 torch.backends.cudnn.deterministic = False

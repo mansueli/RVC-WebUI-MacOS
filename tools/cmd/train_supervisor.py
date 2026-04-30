@@ -53,7 +53,9 @@ def _write_status(path: Path, payload: dict):
     payload = dict(payload)
     payload["updated_at"] = _now_iso()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _append_log(log_path: Path, line: str):
@@ -64,11 +66,17 @@ def _append_log(log_path: Path, line: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cmd", required=True, help="Training shell command to execute")
+    parser.add_argument(
+        "--cmd", required=True, help="Training shell command to execute"
+    )
     parser.add_argument("--cwd", required=True, help="Working directory")
     parser.add_argument("--exp", required=True, help="Experiment name")
-    parser.add_argument("--log-file", required=True, help="Combined training/supervisor log file")
-    parser.add_argument("--status-file", required=True, help="Training status JSON path")
+    parser.add_argument(
+        "--log-file", required=True, help="Combined training/supervisor log file"
+    )
+    parser.add_argument(
+        "--status-file", required=True, help="Training status JSON path"
+    )
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=int, default=20)
     parser.add_argument("--oom-backoff", action="store_true", default=True)
@@ -107,7 +115,9 @@ def main():
 
     def _handle_signal(signum, _frame):
         stop_requested["value"] = True
-        _append_log(log_path, f"Received signal {signum}, will stop after current child exits")
+        _append_log(
+            log_path, f"Received signal {signum}, will stop after current child exits"
+        )
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)

@@ -54,7 +54,6 @@ import threading
 import shutil
 import logging
 
-
 logging.getLogger("numba").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -331,7 +330,9 @@ def _is_f0_enabled(if_f0_3):
 def _count_files_with_suffix(path_obj: pathlib.Path, suffix: str):
     if not path_obj.exists():
         return 0
-    return sum(1 for p in path_obj.iterdir() if p.is_file() and p.name.lower().endswith(suffix))
+    return sum(
+        1 for p in path_obj.iterdir() if p.is_file() and p.name.lower().endswith(suffix)
+    )
 
 
 def _get_experiment_progress(exp_dir1, if_f0_3, version19):
@@ -370,8 +371,11 @@ def inspect_experiment_progress(exp_dir1, if_f0_3, version19):
 
     p = _get_experiment_progress(exp_dir1.strip(), if_f0_3, version19)
     if not p["exists"]:
-        return "No existing experiment folder found yet. A new one will be created." \
-            + "\nPath: " + p["exp_path"]
+        return (
+            "No existing experiment folder found yet. A new one will be created."
+            + "\nPath: "
+            + p["exp_path"]
+        )
 
     lines = [
         "Experiment: " + exp_dir1.strip(),
@@ -393,9 +397,8 @@ def clear_experiment_artifacts(exp_dir1, if_f0_3, version19, clear_step1, clear_
     exp_name = exp_dir1.strip()
     exp_path = pathlib.Path(now_dir, "logs", exp_name)
     if not exp_path.exists():
-        return (
-            "No experiment folder found to clear.\n"
-            + inspect_experiment_progress(exp_name, if_f0_3, version19)
+        return "No experiment folder found to clear.\n" + inspect_experiment_progress(
+            exp_name, if_f0_3, version19
         )
 
     targets = []
@@ -475,7 +478,9 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None):
     log_file_path = exp_path / "preprocess.log"
     f = open(log_file_path, "w")
     f.close()
-    force_preprocess = str(preprocess_mode) == i18n("Full rebuild (reprocess all files)")
+    force_preprocess = str(preprocess_mode) == i18n(
+        "Full rebuild (reprocess all files)"
+    )
     cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s" %s %.1f %s' % (
         config.python_cmd,
         trainset_dir,
@@ -543,7 +548,11 @@ def extract_f0_feature(n_p, f0method, if_f0, exp_dir, version19, rmvpe_workers="
         feature_fail_count += process_fail_count
 
         if if_f0:
-            f0_ok = f0_fail_count == 0 and f0_count >= wav_count and f0nsf_count >= wav_count
+            f0_ok = (
+                f0_fail_count == 0
+                and f0_count >= wav_count
+                and f0nsf_count >= wav_count
+            )
             f0_line = "F0: %s (%s/%s), NSF: %s/%s, Failures: %s" % (
                 "COMPLETE" if f0_ok else "FAILED",
                 f0_count,
@@ -654,7 +663,9 @@ def extract_f0_feature(n_p, f0method, if_f0, exp_dir, version19, rmvpe_workers="
                         "%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir),
                         "a",
                     ) as f:
-                        f.write("process-failed-f0-worker-%s-exitcode-%s\n" % (idx, code))
+                        f.write(
+                            "process-failed-f0-worker-%s-exitcode-%s\n" % (idx, code)
+                        )
         else:
             code = p.poll()
             if code not in (0, None):
@@ -822,29 +833,30 @@ def _ensure_mute_samples(sr: int, fea_dim: int):
     frames to survive the segment_size filter in DistributedBucketSampler.
     """
     import wave, struct  # stdlib — no extra deps
-    n_seconds = 2
-    n_samples = sr * n_seconds                 # 96000 @ 48k
-    hop_length = 480 if sr >= 40000 else 160   # match config hop_length
-    T_spec = n_samples // hop_length           # spectrogram frames (200 @ 48k)
-    T_feat = T_spec // 2                       # feature frames (before np.repeat)
 
-    mute_dir   = os.path.join(now_dir, "logs", "mute")
-    wav_dir    = os.path.join(mute_dir, "0_gt_wavs")
-    feat_dir   = os.path.join(mute_dir, "3_feature%d" % fea_dim)
-    f0_dir     = os.path.join(mute_dir, "2a_f0")
-    f0nsf_dir  = os.path.join(mute_dir, "2b-f0nsf")
+    n_seconds = 2
+    n_samples = sr * n_seconds  # 96000 @ 48k
+    hop_length = 480 if sr >= 40000 else 160  # match config hop_length
+    T_spec = n_samples // hop_length  # spectrogram frames (200 @ 48k)
+    T_feat = T_spec // 2  # feature frames (before np.repeat)
+
+    mute_dir = os.path.join(now_dir, "logs", "mute")
+    wav_dir = os.path.join(mute_dir, "0_gt_wavs")
+    feat_dir = os.path.join(mute_dir, "3_feature%d" % fea_dim)
+    f0_dir = os.path.join(mute_dir, "2a_f0")
+    f0nsf_dir = os.path.join(mute_dir, "2b-f0nsf")
     for d in (wav_dir, feat_dir, f0_dir, f0nsf_dir):
         os.makedirs(d, exist_ok=True)
 
-    wav_path    = os.path.join(wav_dir,   "mute%dk.wav" % (sr // 1000))
-    feat_path   = os.path.join(feat_dir,  "mute.npy")
-    f0_path     = os.path.join(f0_dir,    "mute.wav.npy")
-    f0nsf_path  = os.path.join(f0nsf_dir, "mute.wav.npy")
+    wav_path = os.path.join(wav_dir, "mute%dk.wav" % (sr // 1000))
+    feat_path = os.path.join(feat_dir, "mute.npy")
+    f0_path = os.path.join(f0_dir, "mute.wav.npy")
+    f0nsf_path = os.path.join(f0nsf_dir, "mute.wav.npy")
 
     if not os.path.exists(wav_path):
         with wave.open(wav_path, "w") as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2)          # 16-bit
+            wf.setsampwidth(2)  # 16-bit
             wf.setframerate(sr)
             wf.writeframes(struct.pack("<%dh" % n_samples, *([0] * n_samples)))
         logger.info("Generated mute wav: %s", wav_path)
@@ -1101,7 +1113,9 @@ def click_train(
             f0nsf_path = os.path.join(f0nsf_dir, fname + ".npy")
             if not os.path.exists(f0_path) or not os.path.exists(f0nsf_path):
                 continue
-            opt.append("%s|%s|%s|%s|%s" % (gt_path, feat_path, f0_path, f0nsf_path, spk_id5))
+            opt.append(
+                "%s|%s|%s|%s|%s" % (gt_path, feat_path, f0_path, f0nsf_path, spk_id5)
+            )
         else:
             opt.append("%s|%s|%s" % (gt_path, feat_path, spk_id5))
         names.append(fname)
@@ -1219,15 +1233,12 @@ def click_train(
                 start_new_session=True,
             )
         TRAINING_PROCESSES[exp_dir1] = p
-        artifacts["pid_file"].write_text(
-            str(p.pid), encoding="utf-8"
-        )
+        artifacts["pid_file"].write_text(str(p.pid), encoding="utf-8")
         return (
             "Training supervisor started in background (PID %s). " % p.pid
             + "You can close the browser tab; training will keep running. "
             + "Auto-resume is enabled for failures (up to 3 retries, with OOM batch-size backoff). "
-            + "Logs: %s"
-            % webui_log_path
+            + "Logs: %s" % webui_log_path
         )
 
     rc = subprocess.run(supervisor_cmd, shell=True, cwd=now_dir).returncode
@@ -1370,7 +1381,9 @@ def train1key(
 
     exp_name = exp_dir1.strip()
     if_f0_enabled = _is_f0_enabled(if_f0_3)
-    force_preprocess = str(preprocess_mode8) == i18n("Full rebuild (reprocess all files)")
+    force_preprocess = str(preprocess_mode8) == i18n(
+        "Full rebuild (reprocess all files)"
+    )
 
     progress = _get_experiment_progress(exp_name, if_f0_enabled, version19)
 
@@ -1861,18 +1874,24 @@ with gr.Blocks(title="RVC WebUI") as app:
                     variant="secondary",
                 )
                 auto_resume8 = gr.Checkbox(
-                    label=i18n("Auto-resume one-click training (skip completed Step 1/2)"),
+                    label=i18n(
+                        "Auto-resume one-click training (skip completed Step 1/2)"
+                    ),
                     value=True,
                     interactive=True,
                 )
             with gr.Row():
                 clear_step1_ck = gr.Checkbox(
-                    label=i18n("Clear Step 1 outputs (0_gt_wavs, 1_16k_wavs, preprocess.log)"),
+                    label=i18n(
+                        "Clear Step 1 outputs (0_gt_wavs, 1_16k_wavs, preprocess.log)"
+                    ),
                     value=False,
                     interactive=True,
                 )
                 clear_step2_ck = gr.Checkbox(
-                    label=i18n("Clear Step 2 outputs (2a_f0, 2b-f0nsf, 3_feature*, extract log)"),
+                    label=i18n(
+                        "Clear Step 2 outputs (2a_f0, 2b-f0nsf, 3_feature*, extract log)"
+                    ),
                     value=True,
                     interactive=True,
                 )
@@ -2087,7 +2106,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                     but3 = gr.Button(i18n("Train model"), variant="primary")
                     but4 = gr.Button(i18n("Train feature index"), variant="primary")
                     but5 = gr.Button(i18n("One-click training"), variant="primary")
-                    but_train_status = gr.Button(i18n("Train status"), variant="secondary")
+                    but_train_status = gr.Button(
+                        i18n("Train status"), variant="secondary"
+                    )
                     but_stop_train = gr.Button(
                         i18n("Stop training after current epoch"),
                         variant="secondary",

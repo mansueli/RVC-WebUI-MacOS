@@ -95,18 +95,18 @@ class PreProcess:
     def pipeline(self, path):
         try:
             # Skip .DS_Store files
-            if os.path.basename(path) == '.DS_Store':
+            if os.path.basename(path) == ".DS_Store":
                 return None
 
             base_name = os.path.basename(path)
             if not force and self.has_existing_slices(base_name):
                 println("%s\t-> Skipped (already processed)" % path)
                 return None
-            
+
             audio = load_audio(path, self.sr)
             if audio is None:
                 return None
-            
+
             # zero phased digital filter cause pre-ringing noise...
             # audio = signal.filtfilt(self.bh, self.ah, audio)
             audio = signal.lfilter(self.bh, self.ah, audio)
@@ -119,14 +119,14 @@ class PreProcess:
                     i += 1
                     if len(audio[start:]) > self.tail * self.sr:
                         tmp_audio = audio[start : start + int(self.per * self.sr)]
-                        #self.norm_write(tmp_audio, path, idx1)
+                        # self.norm_write(tmp_audio, path, idx1)
                         self.norm_write(tmp_audio, base_name, idx1)
                         idx1 += 1
                     else:
                         tmp_audio = audio[start:]
                         idx1 += 1
                         break
-                #self.norm_write(tmp_audio, path, idx1)
+                # self.norm_write(tmp_audio, path, idx1)
                 self.norm_write(tmp_audio, base_name, idx1)
             self.existing_slice_bases.add(base_name)
             println("%s\t-> Success" % path)

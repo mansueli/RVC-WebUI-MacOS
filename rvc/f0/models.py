@@ -6,7 +6,9 @@ import torch.nn as nn
 from .e2e import E2E
 
 
-def _strip_common_prefixes(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def _strip_common_prefixes(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
     prefixes = ("module.", "model.")
     for prefix in prefixes:
         if any(k.startswith(prefix) for k in state_dict):

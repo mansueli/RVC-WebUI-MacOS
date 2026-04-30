@@ -22,45 +22,59 @@ HF_BASE = "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main"
 
 ASSETS: list[tuple[str, str]] = [
     # (local path relative to repo root,  HF path)
-    ("assets/hubert/hubert_base.pt",                    "hubert_base.pt"),
-    ("assets/rmvpe/rmvpe.pt",                           "rmvpe.pt"),
+    ("assets/hubert/hubert_base.pt", "hubert_base.pt"),
+    ("assets/rmvpe/rmvpe.pt", "rmvpe.pt"),
     # pretrained v1
-    ("assets/pretrained/D32k.pth",                      "pretrained/D32k.pth"),
-    ("assets/pretrained/D40k.pth",                      "pretrained/D40k.pth"),
-    ("assets/pretrained/D48k.pth",                      "pretrained/D48k.pth"),
-    ("assets/pretrained/G32k.pth",                      "pretrained/G32k.pth"),
-    ("assets/pretrained/G40k.pth",                      "pretrained/G40k.pth"),
-    ("assets/pretrained/G48k.pth",                      "pretrained/G48k.pth"),
-    ("assets/pretrained/f0D32k.pth",                    "pretrained/f0D32k.pth"),
-    ("assets/pretrained/f0D40k.pth",                    "pretrained/f0D40k.pth"),
-    ("assets/pretrained/f0D48k.pth",                    "pretrained/f0D48k.pth"),
-    ("assets/pretrained/f0G32k.pth",                    "pretrained/f0G32k.pth"),
-    ("assets/pretrained/f0G40k.pth",                    "pretrained/f0G40k.pth"),
-    ("assets/pretrained/f0G48k.pth",                    "pretrained/f0G48k.pth"),
+    ("assets/pretrained/D32k.pth", "pretrained/D32k.pth"),
+    ("assets/pretrained/D40k.pth", "pretrained/D40k.pth"),
+    ("assets/pretrained/D48k.pth", "pretrained/D48k.pth"),
+    ("assets/pretrained/G32k.pth", "pretrained/G32k.pth"),
+    ("assets/pretrained/G40k.pth", "pretrained/G40k.pth"),
+    ("assets/pretrained/G48k.pth", "pretrained/G48k.pth"),
+    ("assets/pretrained/f0D32k.pth", "pretrained/f0D32k.pth"),
+    ("assets/pretrained/f0D40k.pth", "pretrained/f0D40k.pth"),
+    ("assets/pretrained/f0D48k.pth", "pretrained/f0D48k.pth"),
+    ("assets/pretrained/f0G32k.pth", "pretrained/f0G32k.pth"),
+    ("assets/pretrained/f0G40k.pth", "pretrained/f0G40k.pth"),
+    ("assets/pretrained/f0G48k.pth", "pretrained/f0G48k.pth"),
     # pretrained v2
-    ("assets/pretrained_v2/D32k.pth",                   "pretrained_v2/D32k.pth"),
-    ("assets/pretrained_v2/D40k.pth",                   "pretrained_v2/D40k.pth"),
-    ("assets/pretrained_v2/D48k.pth",                   "pretrained_v2/D48k.pth"),
-    ("assets/pretrained_v2/G32k.pth",                   "pretrained_v2/G32k.pth"),
-    ("assets/pretrained_v2/G40k.pth",                   "pretrained_v2/G40k.pth"),
-    ("assets/pretrained_v2/G48k.pth",                   "pretrained_v2/G48k.pth"),
-    ("assets/pretrained_v2/f0D32k.pth",                 "pretrained_v2/f0D32k.pth"),
-    ("assets/pretrained_v2/f0D40k.pth",                 "pretrained_v2/f0D40k.pth"),
-    ("assets/pretrained_v2/f0D48k.pth",                 "pretrained_v2/f0D48k.pth"),
-    ("assets/pretrained_v2/f0G32k.pth",                 "pretrained_v2/f0G32k.pth"),
-    ("assets/pretrained_v2/f0G40k.pth",                 "pretrained_v2/f0G40k.pth"),
-    ("assets/pretrained_v2/f0G48k.pth",                 "pretrained_v2/f0G48k.pth"),
+    ("assets/pretrained_v2/D32k.pth", "pretrained_v2/D32k.pth"),
+    ("assets/pretrained_v2/D40k.pth", "pretrained_v2/D40k.pth"),
+    ("assets/pretrained_v2/D48k.pth", "pretrained_v2/D48k.pth"),
+    ("assets/pretrained_v2/G32k.pth", "pretrained_v2/G32k.pth"),
+    ("assets/pretrained_v2/G40k.pth", "pretrained_v2/G40k.pth"),
+    ("assets/pretrained_v2/G48k.pth", "pretrained_v2/G48k.pth"),
+    ("assets/pretrained_v2/f0D32k.pth", "pretrained_v2/f0D32k.pth"),
+    ("assets/pretrained_v2/f0D40k.pth", "pretrained_v2/f0D40k.pth"),
+    ("assets/pretrained_v2/f0D48k.pth", "pretrained_v2/f0D48k.pth"),
+    ("assets/pretrained_v2/f0G32k.pth", "pretrained_v2/f0G32k.pth"),
+    ("assets/pretrained_v2/f0G40k.pth", "pretrained_v2/f0G40k.pth"),
+    ("assets/pretrained_v2/f0G48k.pth", "pretrained_v2/f0G48k.pth"),
     # uvr5
-    ("assets/uvr5_weights/HP2-人声vocals+非人声instrumentals.pth",  "uvr5_weights/HP2-人声vocals+非人声instrumentals.pth"),
-    ("assets/uvr5_weights/HP2_all_vocals.pth",           "uvr5_weights/HP2_all_vocals.pth"),
-    ("assets/uvr5_weights/HP3_all_vocals.pth",           "uvr5_weights/HP3_all_vocals.pth"),
-    ("assets/uvr5_weights/HP5-主旋律人声vocals+其他instrumentals.pth", "uvr5_weights/HP5-主旋律人声vocals+其他instrumentals.pth"),
-    ("assets/uvr5_weights/HP5_only_main_vocal.pth",      "uvr5_weights/HP5_only_main_vocal.pth"),
-    ("assets/uvr5_weights/VR-DeEchoAggressive.pth",      "uvr5_weights/VR-DeEchoAggressive.pth"),
-    ("assets/uvr5_weights/VR-DeEchoDeReverb.pth",        "uvr5_weights/VR-DeEchoDeReverb.pth"),
-    ("assets/uvr5_weights/VR-DeEchoNormal.pth",          "uvr5_weights/VR-DeEchoNormal.pth"),
-    ("assets/uvr5_weights/onnx_dereverb_By_FoxJoy/vocals.onnx",
-     "uvr5_weights/onnx_dereverb_By_FoxJoy/vocals.onnx"),
+    (
+        "assets/uvr5_weights/HP2-人声vocals+非人声instrumentals.pth",
+        "uvr5_weights/HP2-人声vocals+非人声instrumentals.pth",
+    ),
+    ("assets/uvr5_weights/HP2_all_vocals.pth", "uvr5_weights/HP2_all_vocals.pth"),
+    ("assets/uvr5_weights/HP3_all_vocals.pth", "uvr5_weights/HP3_all_vocals.pth"),
+    (
+        "assets/uvr5_weights/HP5-主旋律人声vocals+其他instrumentals.pth",
+        "uvr5_weights/HP5-主旋律人声vocals+其他instrumentals.pth",
+    ),
+    (
+        "assets/uvr5_weights/HP5_only_main_vocal.pth",
+        "uvr5_weights/HP5_only_main_vocal.pth",
+    ),
+    (
+        "assets/uvr5_weights/VR-DeEchoAggressive.pth",
+        "uvr5_weights/VR-DeEchoAggressive.pth",
+    ),
+    ("assets/uvr5_weights/VR-DeEchoDeReverb.pth", "uvr5_weights/VR-DeEchoDeReverb.pth"),
+    ("assets/uvr5_weights/VR-DeEchoNormal.pth", "uvr5_weights/VR-DeEchoNormal.pth"),
+    (
+        "assets/uvr5_weights/onnx_dereverb_By_FoxJoy/vocals.onnx",
+        "uvr5_weights/onnx_dereverb_By_FoxJoy/vocals.onnx",
+    ),
 ]
 
 # rmvpe.onnx is optional (Windows/Linux CPU only); skip it on macOS.
@@ -68,10 +82,12 @@ OPTIONAL_ASSETS: list[tuple[str, str]] = [
     ("assets/rmvpe/rmvpe.onnx", "rmvpe.onnx"),
 ]
 
+
 # Characters that requests does not percent-encode by default in URL paths
 # (notably '+' which HuggingFace treats literally, not as space).
 def _hf_url(hf_path: str) -> str:
     from urllib.parse import quote
+
     return f"{HF_BASE}/{quote(hf_path, safe='/')}"
 
 
@@ -99,6 +115,7 @@ def parse_args() -> argparse.Namespace:
 
 def download_file(url: str, dest: Path, logger: logging.Logger) -> bool:
     import requests
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Downloading %s", dest)
     try:
@@ -134,7 +151,9 @@ def main() -> int:
     if args.include_optional:
         assets_to_process += OPTIONAL_ASSETS
 
-    missing = [(local, hf) for local, hf in assets_to_process if not Path(local).exists()]
+    missing = [
+        (local, hf) for local, hf in assets_to_process if not Path(local).exists()
+    ]
 
     if not missing:
         logger.info("All required assets are already present.")
@@ -166,4 +185,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

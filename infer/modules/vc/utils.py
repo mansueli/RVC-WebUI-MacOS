@@ -5,12 +5,16 @@ import torch as _torch
 # checkpoint loading (it uses arbitrary Python objects like Dictionary).
 # Patch torch.load to pass weights_only=False for .pt/.pth files.
 _orig_torch_load = _torch.load
+
+
 def _patched_torch_load(f, *args, **kwargs):
     if "weights_only" not in kwargs:
         path = f if isinstance(f, str) else getattr(f, "name", "")
         if isinstance(path, str) and path.endswith((".pt", ".pth")):
             kwargs["weights_only"] = False
     return _orig_torch_load(f, *args, **kwargs)
+
+
 _torch.load = _patched_torch_load
 
 from fairseq import checkpoint_utils

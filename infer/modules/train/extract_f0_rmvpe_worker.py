@@ -70,7 +70,9 @@ class FeatureInput:
                         f"rmvpe-worker-{part_idx}: f0ing,now-{idx},all-{len(paths)},-{inp_path}"
                     )
 
-                if os.path.exists(opt_path1 + ".npy") and os.path.exists(opt_path2 + ".npy"):
+                if os.path.exists(opt_path1 + ".npy") and os.path.exists(
+                    opt_path2 + ".npy"
+                ):
                     continue
 
                 x = load_audio(inp_path, self.fs)
