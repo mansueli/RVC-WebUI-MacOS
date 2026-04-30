@@ -95,13 +95,17 @@ def _check_hqsvc_env(repo_dir: Path) -> tuple[bool, str]:
             "Then re-run V3 training."
         )
 
-    train_py = repo_dir / "train.py"
-    if not train_py.exists():
+    train_candidates = [
+        repo_dir / "train.py",
+        repo_dir / "train_cli.py",
+        repo_dir / "scripts" / "train.py",
+    ]
+    if not any(p.exists() for p in train_candidates):
         return False, (
-            "HQ-SVC training code not found at '%s'.\n"
-            "The HQ-SVC authors have not yet released upstream training code.\n"
-            "When training code becomes available at %s, re-run V3 training.\n"
-            "See: https://github.com/ShawnPi233/HQ-SVC" % (train_py, train_py)
+            "HQ-SVC training code not found in '%s'.\n"
+            "Expected one of: train.py, train_cli.py, scripts/train.py\n"
+            "You can also pass --train-entry to point at a custom training script."
+            % repo_dir
         )
 
     venv_python = repo_dir / "venv" / "bin" / "python"
@@ -168,6 +172,11 @@ def parse_args() -> argparse.Namespace:
         "--setup-only",
         action="store_true",
         help="Validate prerequisites and environment, then exit without training.",
+    )
+    parser.add_argument(
+        "--train-entry",
+        default="auto",
+        help="HQ-SVC training entry script path (relative to repo-dir) or 'auto'.",
     )
     return parser.parse_args()
 
@@ -239,11 +248,13 @@ def main() -> int:
 
     # --- Invoke HQ-SVC training ---
     venv_python = repo_dir / "venv" / "bin" / "python"
-    train_py = repo_dir / "train.py"
+    train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_native_train.py"
 
     cmd = [
         str(venv_python),
-        str(train_py),
+        str(train_launcher),
+        "--repo-dir",
+        str(repo_dir),
         "--exp-dir", str(exp_dir),
         "--sr", "48000",
         "--f0", str(args.f0),
@@ -251,6 +262,8 @@ def main() -> int:
         "--save-epoch", str(args.save_epoch),
         "--batch-size", str(args.batch_size),
         "--save-every-weights", str(args.save_every_weights),
+        "--train-entry",
+        str(args.train_entry),
     ]
     if args.author:
         cmd += ["--author", args.author]

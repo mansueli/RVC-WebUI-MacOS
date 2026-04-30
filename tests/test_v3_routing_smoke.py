@@ -108,43 +108,46 @@ def test_hqsvc_train_adapter_missing_dataset_exits_one():
 
 def test_hqsvc_train_adapter_hqsvc_not_cloned_exits_zero():
     """When dataset exists but HQ-SVC is not set up, adapter exits 0 (setup-required)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = pathlib.Path(tmp)
-        # Create minimal dataset structure so prerequisites pass
-        exp_dir = tmp_path / "logs" / "v3_smoke_test"
-        (exp_dir / "0_gt_wavs").mkdir(parents=True)
-        (exp_dir / "3_feature768").mkdir(parents=True)
-        # Write a dummy wav and npy to satisfy file-existence checks.
-        # The adapter only checks existence/glob, not content validity.
+    import shutil
+    exp_name = "_v3_smoke_test_tmp"
+    exp_dir = REPO_ROOT / "logs" / exp_name
+    try:
+        (exp_dir / "0_gt_wavs").mkdir(parents=True, exist_ok=True)
+        (exp_dir / "3_feature768").mkdir(parents=True, exist_ok=True)
+        # Write dummy files to satisfy file-existence checks.
         (exp_dir / "0_gt_wavs" / "dummy.wav").write_bytes(b"\x00" * 44)
         (exp_dir / "3_feature768" / "dummy.npy").write_bytes(b"\x93NUMPY\x01\x00" + b"\x00" * 64)
 
-        adapter = REPO_ROOT / "tools" / "cmd" / "hqsvc_train_adapter.py"
-        result = subprocess.run(
-            [
-                sys.executable, str(adapter),
-                "--exp-dir", "v3_smoke_test",
-                "--sr", "48k",
-                "--repo-dir", str(tmp_path / "external" / "HQ-SVC"),
-                "--status-file", str(tmp_path / "status.json"),
-                "--setup-only",
-            ],
-            capture_output=True,
-            text=True,
-            cwd=str(tmp_path),
-            timeout=15,
-        )
-        # HQ-SVC not cloned -> exit 0 with "setup_required" status
-        assert result.returncode == 0, (
-            "Expected exit code 0 (setup-required informational exit), got %d.\n%s"
-            % (result.returncode, result.stdout + result.stderr)
-        )
-        status_file = tmp_path / "status.json"
-        assert status_file.exists(), "Adapter must write a status JSON"
-        status = json.loads(status_file.read_text())
-        assert status["state"] == "setup_required", (
-            "Expected state='setup_required', got: %s" % status["state"]
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            status_file = tmp_path / "status.json"
+            adapter = REPO_ROOT / "tools" / "cmd" / "hqsvc_train_adapter.py"
+            result = subprocess.run(
+                [
+                    sys.executable, str(adapter),
+                    "--exp-dir", exp_name,
+                    "--sr", "48k",
+                    "--repo-dir", str(tmp_path / "external" / "HQ-SVC"),
+                    "--status-file", str(status_file),
+                    "--setup-only",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                timeout=15,
+            )
+            # HQ-SVC not cloned -> exit 0 with "setup_required" status
+            assert result.returncode == 0, (
+                "Expected exit code 0 (setup-required informational exit), got %d.\n%s"
+                % (result.returncode, result.stdout + result.stderr)
+            )
+            assert status_file.exists(), "Adapter must write a status JSON"
+            status = json.loads(status_file.read_text())
+            assert status["state"] == "setup_required", (
+                "Expected state='setup_required', got: %s" % status["state"]
+            )
+    finally:
+        shutil.rmtree(exp_dir, ignore_errors=True)
 
 
 def test_hqsvc_train_adapter_wrong_sr_exits_one():

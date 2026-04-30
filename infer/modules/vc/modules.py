@@ -1,6 +1,8 @@
 import traceback
 import logging
 import os
+import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class VC:
         self.if_f0 = None
         self.version = None
         self.hubert_model = None
+        self.model_path = ""
 
         self.config = config
 
@@ -84,6 +87,7 @@ class VC:
 
         person = f'{os.getenv("weight_root")}/{sid}'
         logger.info(f"Loading: {person}")
+        self.model_path = person
 
         self.net_g, self.cpt = load_synthesizer(person, self.config.device)
         self.tgt_sr = self.cpt["config"][-1]
@@ -93,9 +97,8 @@ class VC:
 
         if self.version == "v3":
             logger.info(
-                "V3 model detected: using RVC compatibility fallback for inference. "
-                "Full HQ-SVC-native inference will be available once the HQ-SVC "
-                "inference backend is configured at external/HQ-SVC/."
+                "V3 model detected: defaulting to native HQ-SVC inference backend. "
+                "Set RVC_V3_BACKEND=fallback to force RVC compatibility inference."
             )
 
         if self.config.is_half:
@@ -141,17 +144,55 @@ class VC:
         elif hasattr(input_audio_path, "name"):
             input_audio_path = str(input_audio_path.name)
 
-        # V3 inference dispatch: route to HQ-SVC backend when available,
-        # otherwise fall through to the RVC compatibility path.
+        # V3 inference dispatch: native HQ-SVC by default.
+        # RVC fallback is only used when explicitly requested.
         if self.version == "v3":
+            backend_mode = os.getenv("RVC_V3_BACKEND", "native").strip().lower()
             hqsvc_venv = os.path.join("external", "HQ-SVC", "venv", "bin", "python")
-            hqsvc_infer = os.path.join("external", "HQ-SVC", "my_inference.py")
-            if not os.path.exists(hqsvc_venv) or not os.path.exists(hqsvc_infer):
+            launcher = os.path.join("tools", "cmd", "hqsvc_native_infer.py")
+
+            if backend_mode == "fallback":
+                logger.info("RVC_V3_BACKEND=fallback set. Using RVC compatibility path.")
+            elif not os.path.exists(hqsvc_venv) or not os.path.exists(launcher):
                 logger.info(
-                    "V3 HQ-SVC inference backend not available "
-                    "(external/HQ-SVC not set up). "
-                    "Falling back to RVC compatibility path."
+                    "V3 HQ-SVC backend unavailable and fallback is disabled. "
+                    "Set up external/HQ-SVC, or set RVC_V3_BACKEND=fallback explicitly."
                 )
+                return (
+                    "V3 native inference backend is unavailable. "
+                    "Set up external/HQ-SVC or set RVC_V3_BACKEND=fallback.",
+                    None,
+                )
+            else:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".wav", prefix="rvc_v3_native_", delete=False
+                ) as tf:
+                    out_wav = tf.name
+                cmd = [
+                    hqsvc_venv,
+                    launcher,
+                    "--repo-dir",
+                    os.path.join("external", "HQ-SVC"),
+                    "--source",
+                    str(input_audio_path),
+                    "--checkpoint",
+                    str(self.model_path),
+                    "--output",
+                    out_wav,
+                    "--expname",
+                    "rvc_v3_native",
+                ]
+                logger.info("V3 native inference launch: %s", " ".join(cmd))
+                rc = subprocess.run(cmd, cwd=os.getcwd()).returncode
+                if rc != 0 or not os.path.exists(out_wav):
+                    return (
+                        "V3 native inference failed. Check external/HQ-SVC runtime and logs.",
+                        None,
+                    )
+
+                audio_native = load_audio(out_wav, self.tgt_sr)
+                audio_opt = (audio_native * 32767.0).astype(np.int16)
+                return "Success (V3 native HQ-SVC).", (self.tgt_sr, audio_opt)
         f0_up_key = int(f0_up_key)
         try:
             audio = load_audio(input_audio_path, 16000)
