@@ -34,13 +34,6 @@ jobs:
         touch logs/mi-test/extract_f0_feature.log
         python infer/modules/train/extract_f0_print.py logs/mi-test $(nproc) pm cpu False
         python infer/modules/train/extract_feature_print.py cpu 1 0 0 logs/mi-test v1 True
-    - name: Smoke test - config bootstrap
+    - name: Smoke tests
       run: |
-        python -c "
-import sys
-sys.argv = ['test', '--nocheck']
-from configs import Config
-c = Config()
-print('Config bootstrap OK: device=%s half=%s' % (c.device, c.is_half))
-assert c.device in ('cpu', 'cuda:0', 'mps'), 'unexpected device: ' + c.device
-"
+        python -m pytest tests/test_smoke.py -v --tb=short

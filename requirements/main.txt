@@ -44,3 +44,4 @@ torchfcpe
 python-dotenv>=1.0.0
 av
 pybase16384
+pytest>=7.0

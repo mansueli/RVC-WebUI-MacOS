@@ -111,7 +111,12 @@ Exit criteria:
 - missing resources produce clear action-oriented errors
 - device selection is visible and matches actual runtime behavior
 
-## Phase 2: Test And CI Hardening ← NEXT
+## Phase 2: Test And CI Hardening ✅ DONE
+
+**Completed changes:**
+- `tests/test_smoke.py`: new pytest suite — config bootstrap, audio utility correctness (float_to_int16, wav buffer), index path discovery (with/without matching index), and asset hash check (valid / missing / mismatch)
+- `requirements/main.txt`: added `pytest>=7.0`
+- `.github/workflows/unitest.yml`: replaced inline config-bootstrap assert with `pytest tests/test_smoke.py -v --tb=short`
 
 Objective:
 
@@ -148,7 +153,7 @@ Exit criteria:
 - CI catches basic regressions in startup and preprocessing flow
 - the team can change config or asset-loading code with lower breakage risk
 
-## Phase 3: Workflow And UX Improvements
+## Phase 3: Workflow And UX Improvements ← NEXT
 
 Objective:
 
@@ -223,26 +228,142 @@ Exit criteria:
 - at least one performance or quality improvement is measurable and repeatable
 - improvements can be reverted independently if they regress quality
 
-## Phase 5: Research Track, Separate From Mainline
+## Phase 5: Experimental V3 Research Track
 
 Objective:
 
-- preserve worthwhile research directions from the prior report without allowing them to block nearer-term product work
+- build a concrete, hardware-realistic path toward a v3 without blocking mainline work
+- evaluate candidates from the 2025–2026 SVC landscape against the current RVC v2 baseline
+- ship improvements incrementally for singing quality first: retrieval and fine-tuning efficiency first, decoder quality second
 
-Research candidates worth retaining:
+Scope boundary:
 
-- staged pretraining on mixed speech and singing data
-- pitch augmentation and broader training-time data diversity
-- stronger vocoder evaluation
-- richer speaker representations to reduce leakage
-- diffusion-based decoding
-- codec-based or unified latent approaches for future major versions
+- v3 in this fork is singing-focused by design
+- speech-oriented conversion remains supported through v1/v2 paths and is not a v3 optimization target
 
-Rules for entering active implementation:
+Entry gate (must be complete before any active implementation here):
 
-- baseline startup and CI work from earlier phases is complete
-- a benchmark harness exists for the relevant path
-- the work can be isolated behind a flag, separate branch, or experimental script
+- Phase 4 benchmark harness exists for the relevant inference path
+- each sub-track is isolated behind a flag, separate branch, or experimental script
+- no v3 work lands in `main` until it passes the Phase 2 smoke suite
+
+---
+
+### Candidate Evaluation Summary
+
+Five candidates were evaluated against three criteria: integration effort on macOS consumer hardware, synergy with the existing RVC v2 codebase, and singing quality ceiling.
+
+**kNN-SVC (SmoothKen, 2025)**
+
+Directly evolves v2's Faiss top-1 retrieval. Adds additive harmonic synthesis and concatenation smoothness optimization, which removes the discontinuity artifacts that are v2's most common complaint. Zero-shot with pretrained checkpoints. Integration is surgical: replace the retrieval and post-processing logic in `infer/modules/vc/pipeline.py`, rebuild the Faiss index in the new format, keep RMVPE F0 and the rest of the WebUI unchanged. Lowest risk of all candidates.
+
+Assessment: strongest candidate for the v3-core track. Measurable win, reversible, no new training pipeline required.
+
+**LoRA-SVC / PlayVoice ecosystem (various, 2025)**
+
+LoRA adapters on Whisper + BigVGAN/NSF-HiFiGAN backbone. Data preparation is identical to v2 (UVR + slicer). Fine-tuning runs on a single consumer GPU with under 20 minutes of target data. Can be applied on top of v2 weights or any of the other candidates as a base. Reduces VRAM and training time significantly.
+
+Assessment: best near-term training UX improvement. Pairs naturally with kNN-SVC retrieval. Together they form the entire v3-core track.
+
+**YingMusic-SVC (GiantAILab, Dec 2025)**
+
+Flow-matching decoder + Flow-GRPO reinforcement learning fine-tuning + energy-balanced loss + singing-specific inductive biases. Highest singing quality ceiling of all candidates. Critically, the paper's pipeline explicitly uses an RVC timbre shifter as a preprocessing step, which means RVC v2 output can feed directly into it. Full code and HF checkpoints available. Multi-stage training is expensive (continuous pretrain → SFT → GRPO) but inference-only use is immediately viable.
+
+Assessment: strongest decoder replacement candidate. Start inference-only to validate quality delta against v2. Only attempt fine-tuning after a benchmark harness and sufficient compute budget exist. This is the v3-experimental branch.
+
+**CoMoSVC (Grace9994, 2025)**
+
+Consistency-model-based SVC. 1–few step diffusion sampling at near-deterministic speed. Intended as a decoder speed optimization, not a base architecture. Requires a trained diffusion base to distill from (e.g., YingMusic or HQ-SVC).
+
+Assessment: relevant only after Track B (YingMusic decoder) is validated. Not a starting point.
+
+**HQ-SVC (ShawnPi233, AAAI 2026)**
+
+Unified codec + EVA module + diffusion refinement. Designed for under 80 hours of training data on consumer hardware. Strong low-resource guarantees on paper. However, the codec + diffusion stack introduces too many new integration surfaces simultaneously for the current codebase state.
+
+Assessment: revisit after Track B (YingMusic) completes its inference-only validation. Could become the low-resource fine-tuning path if YingMusic proves too expensive to fine-tune.
+
+---
+
+### Two-Track Implementation Plan
+
+#### Track A — v3-core (target: ships alongside or after Phase 4)
+
+Goal: a version of the current WebUI with measurably better retrieval quality and faster fine-tuning, no new decoder, no new training infrastructure.
+
+Work items:
+
+1. Fork `infer/modules/vc/pipeline.py` retrieval section into a replaceable interface
+2. Implement kNN-SVC additive-synthesis retrieval + smoothness post-processing behind an `--retrieval-mode knn` flag
+3. Measure RTF and MOS-proxy (UTMOS or similar) before and after on a held-out test set
+4. Add LoRA adapter loading to the training pipeline in `infer/modules/train/`; expose in WebUI as an alternative to full fine-tune
+5. Validate: existing `tests/test_smoke.py` must still pass; add one retrieval regression test
+
+Change surfaces:
+
+- `infer/modules/vc/pipeline.py`
+- `infer/modules/train/` (LoRA adapter loading)
+- `web.py` (retrieval mode selector, LoRA training path)
+- `tests/test_smoke.py` (retrieval regression)
+
+Exit criteria:
+
+- kNN retrieval produces no audible discontinuities on the held-out set
+- LoRA fine-tuning runs end-to-end on a single consumer GPU with under 20 min of target data
+- no regression vs. v2 on the smoke suite
+
+#### Track B — v3-experimental (separate branch: `exp/v3-yingmusic-singing`)
+
+Goal: build a singing-optimized hybrid pipeline that uses YingMusic where it is strongest (accompaniment-robust preprocessing + flow decoder + singing-oriented timbre behavior), while keeping RVC's compatible pieces (HuBERT + RMVPE) to reduce integration risk.
+
+Rationale for a singing-first hybrid rather than a voice-first split:
+
+- this fork's v3 goal is singing quality, not general speech conversion
+- YingMusic's singing inductive biases, energy-balanced loss behavior, and flow-matching decoder are aligned with the target domain
+- keeping HuBERT and RMVPE preserves compatibility with current RVC data/training/inference tooling while still letting YingMusic drive the quality-critical synthesis path
+- speech-specific identity optimization is explicitly deferred; users who need speech-first behavior should continue using v1/v2
+
+Pipeline:
+
+```
+Raw input
+	→ YingMusic vocal isolation  (preprocessing only, separate from inference graph)
+	→ HuBERT               (content encoder, unchanged from v2)
+	→ RMVPE                (F0, unchanged from v2)
+	→ YingMusic timbre path (singing-oriented)
+	→ YingMusic flow decoder  (fine-tuned on singing via LoRA)
+	→ waveform
+```
+
+Work items:
+
+1. Integrate YingMusic vocal isolation as an optional preprocessing step in `training_data/prepare_rvc_dataset.py` behind a `--isolate yingmusic` flag; measure training data SNR improvement on a held-out set of in-the-wild recordings
+2. Wrap the YingMusic flow-matching decoder in `rvc/synthesizer.py` behind a `--decoder flow` flag; verify it accepts HuBERT content + RMVPE F0 + YingMusic timbre conditioning without architectural changes
+3. Add LoRA adapters to the flow decoder; run a singing fine-tune pass on the existing singing-focused datasets; compare MOS-proxy (UTMOS or singing MOS proxy) and RTF vs. v2 HiFi-GAN baseline on MPS
+4. Keep an optional fallback switch to v2 timbre conditioning for A/B tests (`--timbre-mode v2|yingmusic`) to reduce migration risk while benchmarks are collected
+5. Run Phase 2 smoke suite on the branch; add one decoder smoke test (tensor shapes and dtype checks only, no large model download required)
+6. If MOS-proxy improves and RTF on MPS is within 2× of v2, open a PR to merge the hybrid pipeline into main
+
+Change surfaces (branch only until PR):
+
+- `training_data/prepare_rvc_dataset.py` (vocal isolation flag)
+- `infer/modules/vc/pipeline.py` (decoder abstraction, timbre-mode switch)
+- `rvc/synthesizer.py` (flow decoder wrapper)
+- `tests/` (decoder smoke test)
+- `tools/download_models.py` (YingMusic assets/checkpoints entry)
+
+Gate: Track B does not begin until Track A is complete and the Phase 4 benchmark harness exists.
+
+---
+
+### Research Candidates Deferred To Later
+
+These remain worth watching but are not active plan items:
+
+- CoMoSVC — consistency-model speed optimization on top of Track B's flow decoder; revisit after Track B validation produces a working decoder baseline to distill from
+- HQ-SVC — low-resource codec + diffusion path; revisit if ECAPA + flow-decoder fine-tuning proves too expensive on consumer hardware; its <80h training guarantee is the main appeal
+- Staged pretraining on mixed speech and singing data — longer-term; requires large compute budget and a benchmark harness before it is meaningful to measure
+- Diffusion refinement as a post-processing pass — relevant only if Track B's flow decoder does not close the breathiness and high-frequency detail gap on its own
 
 ## Prioritized Backlog
 
@@ -252,7 +373,7 @@ P0: ✅ DONE
 - ~~make asset and path failure modes explicit~~
 - ~~add launch-critical smoke coverage to CI~~
 
-P1:
+P1: ← NEXT
 
 - improve model and index refresh behavior in the WebUI
 - align README and English docs with the actual startup and asset flows
