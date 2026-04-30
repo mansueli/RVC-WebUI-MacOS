@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""V3 training adapter — bridges WebUI training dispatch to HQ-SVC-oriented backend.
+
+This adapter normalises the WebUI training contract (experiment directory,
+hyperparameters, status file) for V3 experiments.
+
+On invocation it will:
+1. Validate all V3-specific prerequisites (48k sample rate, prepared dataset,
+   feature files).
+2. Write a JSON status file compatible with the existing WebUI training supervisor
+   (same schema as train_supervisor.py).
+3. If the HQ-SVC training environment is available (external/HQ-SVC/ with
+   training code and a prepared Python environment), delegate to it.
+4. Otherwise, emit actionable setup instructions and exit cleanly so the WebUI
+   can surface them as a normal status update.
+
+Exit codes:
+  0 — setup-only mode completed or training started/dispatched
+  1 — prerequisite failure (missing dataset, wrong sample rate, etc.)
+  2 — training runtime error after prerequisites passed
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+# Repo root is three levels up from this script: tools/cmd/hqsvc_train_adapter.py
+NOW_DIR = Path(__file__).resolve().parent.parent.parent
+
+
+def _write_status(
+    status_file: Path,
+    state: str,
+    message: str,
+    running: bool = False,
+    **extra,
+) -> None:
+    status = {
+        "state": state,
+        "running": running,
+        "message": message,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "supervisor_pid": os.getpid(),
+        "child_pid": 0,
+        "attempt": 1,
+        "max_retries": 0,
+        "last_exit_code": None,
+        "last_error_type": None,
+        **extra,
+    }
+    status_file.parent.mkdir(parents=True, exist_ok=True)
+    status_file.write_text(
+        json.dumps(status, ensure_ascii=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _validate_prerequisites(args: argparse.Namespace, exp_dir: Path) -> list[str]:
+    errors: list[str] = []
+
+    if args.sr != "48k":
+        errors.append(
+            "V3 requires 48k sample rate (got '%s'). Set SR to 48k and re-run." % args.sr
+        )
+
+    gt_wavs = exp_dir / "0_gt_wavs"
+    if not gt_wavs.exists() or not any(gt_wavs.glob("*.wav")):
+        errors.append(
+            "V3 dataset wavs not found at '%s'. "
+            "Run Step 1 (Process data) first." % gt_wavs
+        )
+
+    feature_dir = exp_dir / "3_feature768"
+    if not feature_dir.exists() or not any(feature_dir.glob("*.npy")):
+        errors.append(
+            "V3 feature files not found at '%s'. "
+            "Run Step 2 (Feature extraction) with v2/v3 feature dim first." % feature_dir
+        )
+
+    return errors
+
+
+def _check_hqsvc_env(repo_dir: Path) -> tuple[bool, str]:
+    """Return (available, reason_if_not_available)."""
+    if not repo_dir.exists():
+        return False, (
+            "HQ-SVC repository not cloned.\n"
+            "Run: python tools/cmd/hqsvc_experiment.py --setup-only\n"
+            "Then re-run V3 training."
+        )
+
+    train_py = repo_dir / "train.py"
+    if not train_py.exists():
+        return False, (
+            "HQ-SVC training code not found at '%s'.\n"
+            "The HQ-SVC authors have not yet released upstream training code.\n"
+            "When training code becomes available at %s, re-run V3 training.\n"
+            "See: https://github.com/ShawnPi233/HQ-SVC" % (train_py, train_py)
+        )
+
+    venv_python = repo_dir / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        return False, (
+            "HQ-SVC Python environment not found at '%s'.\n"
+            "Run: python tools/cmd/hqsvc_experiment.py --setup-only\n"
+            "Then re-run V3 training." % venv_python
+        )
+
+    return True, ""
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="V3 HQ-SVC training adapter for WebUI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--exp-dir",
+        required=True,
+        help="Experiment name (subdirectory under logs/)",
+    )
+    parser.add_argument(
+        "--sr",
+        default="48k",
+        choices=["48k"],
+        help="Sample rate. V3 only supports 48k.",
+    )
+    parser.add_argument(
+        "--f0",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Enable F0 pitch guidance (1=yes, 0=no).",
+    )
+    parser.add_argument("--total-epoch", type=int, default=600)
+    parser.add_argument("--save-epoch", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--save-every-weights",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Save a small final model at each save point (1=yes).",
+    )
+    parser.add_argument("--author", default="")
+    parser.add_argument(
+        "--gpus",
+        default="",
+        help="GPU indices separated by '-', e.g., 0-1 (empty = CPU/MPS).",
+    )
+    parser.add_argument(
+        "--repo-dir",
+        default="external/HQ-SVC",
+        help="Path to cloned HQ-SVC repository (absolute or relative to repo root).",
+    )
+    parser.add_argument(
+        "--status-file",
+        default="",
+        help="Path to training_status.json. Defaults to logs/<exp-dir>/training_status.json.",
+    )
+    parser.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="Validate prerequisites and environment, then exit without training.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    exp_dir = NOW_DIR / "logs" / args.exp_dir
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    status_file = (
+        Path(args.status_file)
+        if args.status_file
+        else exp_dir / "training_status.json"
+    )
+    log_file = exp_dir / "train_webui.log"
+
+    repo_dir_raw = Path(args.repo_dir)
+    repo_dir = (
+        repo_dir_raw if repo_dir_raw.is_absolute() else (NOW_DIR / repo_dir_raw).resolve()
+    )
+
+    _log = log_file.open("a", encoding="utf-8")
+
+    def _print(msg: str) -> None:
+        line = "%s | v3-adapter | %s" % (datetime.now().isoformat(timespec="seconds"), msg)
+        print(line)
+        _log.write(line + "\n")
+        _log.flush()
+
+    _print("Experiment: %s" % args.exp_dir)
+    _print("Exp dir: %s" % exp_dir)
+    _print("Sample rate: %s" % args.sr)
+    _print("F0: %s" % args.f0)
+    _print("Epochs: %s / save every %s" % (args.total_epoch, args.save_epoch))
+    _print("Batch size: %s" % args.batch_size)
+
+    # --- Prerequisite validation ---
+    errors = _validate_prerequisites(args, exp_dir)
+    if errors:
+        msg = "V3 prerequisite check failed:\n" + "\n".join("  - " + e for e in errors)
+        _print(msg)
+        _write_status(status_file, "failed", msg)
+        _log.close()
+        return 1
+
+    _print("Prerequisites OK")
+
+    # --- HQ-SVC environment check ---
+    available, reason = _check_hqsvc_env(repo_dir)
+    if not available:
+        msg = (
+            "V3 training environment not yet fully available.\n\n"
+            + reason
+            + "\n\n"
+            "V3 dataset preparation and feature extraction are fully functional.\n"
+            "Once HQ-SVC training code is available, re-run V3 training to start fine-tuning."
+        )
+        _print(msg)
+        _write_status(status_file, "setup_required", msg)
+        _log.close()
+        return 0  # Not a hard error — informational setup-only exit
+
+    if args.setup_only:
+        _print("V3 environment validated. Ready to train.")
+        _write_status(status_file, "setup_complete", "V3 environment validated. Ready to train.")
+        _log.close()
+        return 0
+
+    # --- Invoke HQ-SVC training ---
+    venv_python = repo_dir / "venv" / "bin" / "python"
+    train_py = repo_dir / "train.py"
+
+    cmd = [
+        str(venv_python),
+        str(train_py),
+        "--exp-dir", str(exp_dir),
+        "--sr", "48000",
+        "--f0", str(args.f0),
+        "--total-epoch", str(args.total_epoch),
+        "--save-epoch", str(args.save_epoch),
+        "--batch-size", str(args.batch_size),
+        "--save-every-weights", str(args.save_every_weights),
+    ]
+    if args.author:
+        cmd += ["--author", args.author]
+    if args.gpus:
+        cmd += ["--gpus", args.gpus]
+
+    _print("Launching HQ-SVC training: %s" % " ".join(cmd))
+    _write_status(status_file, "running", "V3 HQ-SVC training started", running=True)
+
+    result = subprocess.run(cmd, cwd=str(repo_dir), stdout=_log, stderr=subprocess.STDOUT)
+    _log.close()
+
+    if result.returncode == 0:
+        _write_status(status_file, "complete", "V3 training completed successfully")
+        return 0
+
+    _write_status(
+        status_file,
+        "failed",
+        "V3 training exited with code %d. Check %s for details." % (result.returncode, log_file),
+        last_exit_code=result.returncode,
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

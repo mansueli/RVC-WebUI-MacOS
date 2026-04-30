@@ -794,15 +794,38 @@ def change_version19(sr2, if_f0_3, version19):
     path_str = "" if version19 == "v1" else "_v2"
     if sr2 == "32k" and version19 == "v1":
         sr2 = "40k"
-    to_return_sr2 = (
-        {"choices": ["40k", "48k"], "__type__": "update", "value": sr2}
-        if version19 == "v1"
-        else {"choices": ["32k", "40k", "48k"], "__type__": "update", "value": sr2}
-    )
+    if version19 == "v1":
+        to_return_sr2 = {
+            "choices": ["40k", "48k"],
+            "__type__": "update",
+            "value": sr2 if sr2 in ["40k", "48k"] else "48k",
+        }
+    elif version19 == "v3":
+        to_return_sr2 = {
+            "choices": ["48k"],
+            "__type__": "update",
+            "value": "48k",
+        }
+        sr2 = "48k"
+    else:
+        to_return_sr2 = {
+            "choices": ["32k", "40k", "48k"],
+            "__type__": "update",
+            "value": sr2,
+        }
     f0_str = "f0" if if_f0_3 else ""
+    # V3 does not use RVC pretrained G/D — return empty paths for v3.
+    if version19 == "v3":
+        pretrained_g = ""
+        pretrained_d = ""
+    else:
+        pretrained_g, pretrained_d = get_pretrained_models(path_str, f0_str, sr2)
+    v3_row_visible = {"visible": version19 == "v3", "__type__": "update"}
     return (
-        *get_pretrained_models(path_str, f0_str, sr2),
+        pretrained_g,
+        pretrained_d,
         to_return_sr2,
+        v3_row_visible,
     )
 
 
@@ -1050,6 +1073,21 @@ def click_train(
     author,
     run_async=True,
 ):
+    # V3 uses the HQ-SVC-oriented training adapter, not the RVC trainer.
+    if version19 == "v3":
+        return click_train_v3(
+            exp_dir1,
+            sr2,
+            if_f0_3,
+            save_epoch10,
+            total_epoch11,
+            batch_size12,
+            if_save_every_weights18,
+            gpus16,
+            author,
+            run_async=run_async,
+        )
+
     # 生成filelist
     exp_dir = "%s/logs/%s" % (now_dir, exp_dir1)
     os.makedirs(exp_dir, exist_ok=True)
@@ -1437,8 +1475,13 @@ def train1key(
     )
     yield get_info_str(train_result)
 
-    # step3b:训练索引
-    [get_info_str(_) for _ in train_index(exp_dir1, version19)]
+    # step3b: Build FAISS retrieval index (v1/v2 only; V3 uses its own retrieval path)
+    if version19 != "v3":
+        [get_info_str(_) for _ in train_index(exp_dir1, version19)]
+    else:
+        yield get_info_str(
+            "Step 3b: FAISS index skipped for V3 (HQ-SVC uses its own retrieval path)."
+        )
     yield get_info_str(i18n("All processes have been completed!"))
 
 
@@ -1457,6 +1500,174 @@ def change_info_(ckpt_path):
     except:
         traceback.print_exc()
         return {"__type__": "update"}, {"__type__": "update"}, {"__type__": "update"}
+
+
+# ---------------------------------------------------------------------------
+# V3 (HQ-SVC-oriented) backend functions
+# ---------------------------------------------------------------------------
+
+def v3_preprocess_dataset(v3_source_dir, exp_dir1):
+    """Run YingMusic vocal isolation for V3 dataset preparation.
+
+    Invokes yingmusic_experiment.py in setup-only mode (environment check) or
+    with --source-dir / --output-dir if a source directory is provided.
+    Yields log lines streamed to the WebUI status box.
+    """
+    exp_name = (exp_dir1 or "unnamed").strip()
+    isolated_dir = pathlib.Path(now_dir, "logs", exp_name, "v3_isolated")
+    isolated_dir.mkdir(parents=True, exist_ok=True)
+    log_path = pathlib.Path(now_dir, "logs", exp_name, "v3_preprocess.log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if v3_source_dir and v3_source_dir.strip():
+        src = v3_source_dir.strip()
+        cmd = (
+            '"%s" tools/cmd/yingmusic_experiment.py'
+            ' --source-dir "%s" --output-dir "%s" --setup-only'
+            % (config.python_cmd, src, str(isolated_dir))
+        )
+        yield "V3 Preprocess: checking YingMusic environment...\n"
+        yield "Source dir:   %s\n" % src
+        yield "Output dir:   %s\n" % str(isolated_dir)
+    else:
+        cmd = (
+            '"%s" tools/cmd/yingmusic_experiment.py --setup-only'
+            % config.python_cmd
+        )
+        yield "V3 Preprocess: checking YingMusic environment (no source dir specified)...\n"
+
+    logger.info("V3 preprocess execute: " + cmd)
+    log_f = open(log_path, "w", encoding="utf-8")
+    p = Popen(cmd, shell=True, cwd=now_dir, stdout=log_f, stderr=subprocess.STDOUT)
+    done = [False]
+    threading.Thread(target=if_done, args=(done, p)).start()
+
+    while True:
+        log_f.flush()
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
+            yield rf.read()
+        sleep(1)
+        if done[0]:
+            break
+
+    log_f.close()
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
+        log = rf.read()
+    logger.info(log)
+    rc = p.poll()
+    if rc == 0:
+        yield log + "\n[V3 Preprocess] Environment check passed."
+    elif rc == 2:
+        yield log + "\n[V3 Preprocess] CUDA not available on this host. " \
+            "Run on a CUDA machine or use the isolated vocals directory manually."
+    else:
+        yield log + "\n[V3 Preprocess] Finished (exit code %s)." % rc
+
+
+def click_train_v3(
+    exp_dir1,
+    sr2,
+    if_f0_3,
+    save_epoch10,
+    total_epoch11,
+    batch_size12,
+    if_save_every_weights18,
+    gpus16,
+    author,
+    run_async=True,
+):
+    """Dispatch V3 training to the HQ-SVC training adapter.
+
+    Reuses the existing training supervisor infrastructure (same log file,
+    status file, and PID tracking) so V3 training is observable and stoppable
+    via the same train-status / stop-training buttons.
+    """
+    exp_dir = pathlib.Path(now_dir, "logs", exp_dir1)
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = _training_artifacts(exp_dir1)
+
+    existing_pid = _active_training_pid(exp_dir1)
+    if existing_pid is not None:
+        return (
+            "V3 training is already running for experiment '%s' (PID %s). "
+            % (exp_dir1, existing_pid)
+            + "Check training status or wait for it to finish."
+        )
+
+    f0_flag = 1 if _is_f0_enabled(if_f0_3) else 0
+    save_weights_flag = 1 if if_save_every_weights18 == i18n("Yes") else 0
+
+    adapter_cmd = (
+        '"%s" tools/cmd/hqsvc_train_adapter.py'
+        ' --exp-dir "%s"'
+        ' --sr %s'
+        ' --f0 %s'
+        ' --total-epoch %s'
+        ' --save-epoch %s'
+        ' --batch-size %s'
+        ' --save-every-weights %s'
+        ' --author "%s"'
+        ' --status-file "%s"'
+        % (
+            config.python_cmd,
+            exp_dir1,
+            sr2,
+            f0_flag,
+            total_epoch11,
+            save_epoch10,
+            batch_size12,
+            save_weights_flag,
+            author,
+            str(artifacts["status_file"]),
+        )
+    )
+    if gpus16:
+        adapter_cmd += ' --gpus "%s"' % gpus16
+
+    supervisor_cmd = _build_supervisor_cmd(
+        adapter_cmd,
+        exp_dir1,
+        artifacts["status_file"],
+        artifacts["log_file"],
+        artifacts["stop_request_file"],
+        artifacts["stop_ack_file"],
+    )
+
+    # Clear stale stop markers from previous runs.
+    for marker in [artifacts["stop_request_file"], artifacts["stop_ack_file"]]:
+        if marker.exists():
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+    logger.info("V3 train execute: " + adapter_cmd)
+
+    if run_async:
+        with open(artifacts["log_file"], "a", encoding="utf-8") as train_log_file:
+            p = Popen(
+                supervisor_cmd,
+                shell=True,
+                cwd=now_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=train_log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        TRAINING_PROCESSES[exp_dir1] = p
+        artifacts["pid_file"].write_text(str(p.pid), encoding="utf-8")
+        return (
+            "V3 training adapter started in background (PID %s).\n"
+            "The adapter validates prerequisites, checks HQ-SVC environment, and "
+            "launches training if available.\n"
+            "Logs: %s" % (p.pid, artifacts["log_file"])
+        )
+
+    rc = subprocess.run(supervisor_cmd, shell=True, cwd=now_dir).returncode
+    final_msg = get_training_status(exp_dir1)
+    if rc == 0:
+        return "V3 training adapter complete.\n" + final_msg
+    return "V3 training adapter finished with errors.\n" + final_msg
 
 
 with gr.Blocks(title="RVC WebUI") as app:
@@ -1902,11 +2113,46 @@ with gr.Blocks(title="RVC WebUI") as app:
                 )
                 version19 = gr.Radio(
                     label=i18n("Version"),
-                    choices=["v1", "v2"],
-                    value="v2",
+                    choices=["v1", "v2", "v3"],
+                    value="v3",
                     interactive=True,
                     visible=True,
                 )
+            # V3 preprocess section — visible only when V3 is selected.
+            with gr.Row(visible=True) as v3_preprocess_row:
+                gr.Markdown(
+                    value=i18n(
+                        "### V3 Preprocess (YingMusic Vocal Isolation)\n"
+                        "V3 training benefits from isolated vocals. "
+                        "Use this section to check the YingMusic environment and optionally "
+                        "run batch vocal isolation before dataset preparation.\n"
+                        "On macOS/CPU hosts, this runs a setup-only check and shows "
+                        "readiness status. Actual isolation requires a CUDA host."
+                    )
+                )
+                with gr.Column():
+                    v3_source_dir4 = gr.Textbox(
+                        label=i18n(
+                            "V3 Source audio directory (songs/raw vocals to isolate)"
+                        ),
+                        placeholder=i18n("Leave empty to only check environment readiness"),
+                    )
+                    but_v3_preprocess = gr.Button(
+                        i18n("Check / Run V3 Vocal Isolation (YingMusic)"),
+                        variant="secondary",
+                    )
+                with gr.Column():
+                    info_v3_preprocess = gr.Textbox(
+                        label=i18n("V3 Preprocess status"),
+                        value="",
+                        lines=6,
+                    )
+                    but_v3_preprocess.click(
+                        v3_preprocess_dataset,
+                        [v3_source_dir4, exp_dir1],
+                        [info_v3_preprocess],
+                        api_name="v3_preprocess",
+                    )
             gr.Markdown(
                 value=i18n(
                     "### Step 2. Audio processing. \n#### 1. Slicing.\nAutomatically traverse all files in the training folder that can be decoded into audio and perform slice normalization. Generates 2 wav folders in the experiment directory. Currently, only single-singer/speaker training is supported."
@@ -2076,7 +2322,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     version19.change(
                         change_version19,
                         [sr2, if_f0_3, version19],
-                        [pretrained_G14, pretrained_D15, sr2],
+                        [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row],
                     )
                     if_f0_3.change(
                         change_f0,

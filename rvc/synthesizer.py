@@ -13,7 +13,10 @@ def get_synthesizer(cpt: OrderedDict, device=torch.device("cpu")):
     version = cpt.get("version", "v1")
     if version == "v1":
         encoder_dim = 256
-    elif version == "v2":
+    elif version in ["v2", "v3"]:
+        encoder_dim = 768
+    else:
+        # Keep compatibility with future variants by defaulting to v2-like width.
         encoder_dim = 768
     net_g = SynthesizerTrnMsNSFsid(
         *cpt["config"],

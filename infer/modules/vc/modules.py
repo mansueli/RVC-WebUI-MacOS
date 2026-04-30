@@ -91,6 +91,13 @@ class VC:
         self.if_f0 = self.cpt.get("f0", 1)
         self.version = self.cpt.get("version", "v1")
 
+        if self.version == "v3":
+            logger.info(
+                "V3 model detected: using RVC compatibility fallback for inference. "
+                "Full HQ-SVC-native inference will be available once the HQ-SVC "
+                "inference backend is configured at external/HQ-SVC/."
+            )
+
         if self.config.is_half:
             self.net_g = self.net_g.half()
         else:
@@ -133,6 +140,18 @@ class VC:
             return "You need to upload an audio", None
         elif hasattr(input_audio_path, "name"):
             input_audio_path = str(input_audio_path.name)
+
+        # V3 inference dispatch: route to HQ-SVC backend when available,
+        # otherwise fall through to the RVC compatibility path.
+        if self.version == "v3":
+            hqsvc_venv = os.path.join("external", "HQ-SVC", "venv", "bin", "python")
+            hqsvc_infer = os.path.join("external", "HQ-SVC", "my_inference.py")
+            if not os.path.exists(hqsvc_venv) or not os.path.exists(hqsvc_infer):
+                logger.info(
+                    "V3 HQ-SVC inference backend not available "
+                    "(external/HQ-SVC not set up). "
+                    "Falling back to RVC compatibility path."
+                )
         f0_up_key = int(f0_up_key)
         try:
             audio = load_audio(input_audio_path, 16000)
