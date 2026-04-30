@@ -149,41 +149,63 @@ class VC:
         if self.version == "v3":
             backend_mode = os.getenv("RVC_V3_BACKEND", "native").strip().lower()
             hqsvc_venv = os.path.join("external", "HQ-SVC", "venv", "bin", "python")
-            launcher = os.path.join("tools", "cmd", "hqsvc_native_infer.py")
+            ext_launcher = os.path.join("tools", "cmd", "hqsvc_native_infer.py")
+            local_launcher = os.path.join("tools", "cmd", "hqsvc_local_infer.py")
 
             if backend_mode == "fallback":
                 logger.info("RVC_V3_BACKEND=fallback set. Using RVC compatibility path.")
-            elif not os.path.exists(hqsvc_venv) or not os.path.exists(launcher):
-                logger.info(
-                    "V3 HQ-SVC backend unavailable and fallback is disabled. "
-                    "Set up external/HQ-SVC, or set RVC_V3_BACKEND=fallback explicitly."
-                )
-                return (
-                    "V3 native inference backend is unavailable. "
-                    "Set up external/HQ-SVC or set RVC_V3_BACKEND=fallback.",
-                    None,
-                )
             else:
                 with tempfile.NamedTemporaryFile(
                     suffix=".wav", prefix="rvc_v3_native_", delete=False
                 ) as tf:
                     out_wav = tf.name
-                cmd = [
-                    hqsvc_venv,
-                    launcher,
-                    "--repo-dir",
-                    os.path.join("external", "HQ-SVC"),
-                    "--source",
-                    str(input_audio_path),
-                    "--checkpoint",
-                    str(self.model_path),
-                    "--output",
-                    out_wav,
-                    "--expname",
-                    "rvc_v3_native",
-                ]
-                logger.info("V3 native inference launch: %s", " ".join(cmd))
-                rc = subprocess.run(cmd, cwd=os.getcwd()).returncode
+                cmds = []
+                if os.path.exists(hqsvc_venv) and os.path.exists(ext_launcher):
+                    cmds.append(
+                        [
+                            hqsvc_venv,
+                            ext_launcher,
+                            "--repo-dir",
+                            os.path.join("external", "HQ-SVC"),
+                            "--source",
+                            str(input_audio_path),
+                            "--checkpoint",
+                            str(self.model_path),
+                            "--output",
+                            out_wav,
+                            "--expname",
+                            "rvc_v3_native",
+                        ]
+                    )
+                if os.path.exists(local_launcher):
+                    cmds.append(
+                        [
+                            str(self.config.python_cmd),
+                            local_launcher,
+                            "--source",
+                            str(input_audio_path),
+                            "--checkpoint",
+                            str(self.model_path),
+                            "--output",
+                            out_wav,
+                        ]
+                    )
+
+                if not cmds:
+                    return (
+                        "V3 native inference backend is unavailable. "
+                        "Set up external/HQ-SVC or local tools/cmd/hqsvc_local_infer.py, "
+                        "or set RVC_V3_BACKEND=fallback.",
+                        None,
+                    )
+
+                rc = 2
+                for cmd in cmds:
+                    logger.info("V3 native inference launch: %s", " ".join(cmd))
+                    rc = subprocess.run(cmd, cwd=os.getcwd()).returncode
+                    if rc == 0 and os.path.exists(out_wav):
+                        break
+
                 if rc != 0 or not os.path.exists(out_wav):
                     return (
                         "V3 native inference failed. Check external/HQ-SVC runtime and logs.",

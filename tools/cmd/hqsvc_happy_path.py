@@ -10,6 +10,7 @@ Flow:
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-dir", default="")
     parser.add_argument("--isolated-output-dir", default="")
     parser.add_argument("--skip-preprocess", action="store_true")
+    parser.add_argument(
+        "--preprocess-backend",
+        default="auto",
+        choices=["auto", "cuda", "cpu"],
+    )
 
     parser.add_argument("--sr", default="48k", choices=["48k"])
     parser.add_argument("--f0", type=int, default=1, choices=[0, 1])
@@ -40,6 +46,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every-weights", type=int, default=1, choices=[0, 1])
     parser.add_argument("--author", default="")
     parser.add_argument("--gpus", default="")
+    parser.add_argument(
+        "--train-backend",
+        default="auto",
+        choices=["auto", "external", "local_experimental"],
+    )
+    parser.add_argument("--steps", type=int, default=2000)
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
+    )
 
     parser.add_argument("--infer-source", default="")
     parser.add_argument("--infer-checkpoint", default="")
@@ -55,21 +72,32 @@ def main() -> int:
     python_cmd = sys.executable
 
     if not args.skip_preprocess:
-        preprocess_cmd = [
-            python_cmd,
-            "tools/cmd/yingmusic_experiment.py",
-        ]
+        selected_preprocess = args.preprocess_backend
+        if selected_preprocess == "auto":
+            selected_preprocess = "cuda" if shutil.which("nvidia-smi") else "cpu"
+
+        preprocess_cmd = [python_cmd]
+        if selected_preprocess == "cuda":
+            preprocess_cmd.append("tools/cmd/yingmusic_experiment.py")
+        else:
+            preprocess_cmd.append("tools/cmd/yingmusic_cpu_preprocess.py")
+
         if args.source_dir:
             preprocess_cmd.extend(["--source-dir", args.source_dir])
             if args.isolated_output_dir:
                 preprocess_cmd.extend(["--output-dir", args.isolated_output_dir])
         else:
-            preprocess_cmd.append("--setup-only")
+            if selected_preprocess == "cuda":
+                preprocess_cmd.append("--setup-only")
+            else:
+                print("[info] CPU preprocess selected but --source-dir not provided; skipping preprocess run.")
+                preprocess_cmd = []
 
-        rc = run(preprocess_cmd)
-        if rc != 0:
-            print("[error] Preprocess step failed.")
-            return rc
+        if preprocess_cmd:
+            rc = run(preprocess_cmd)
+            if rc != 0:
+                print("[error] Preprocess step failed.")
+                return rc
 
     train_cmd = [
         python_cmd,
@@ -90,6 +118,12 @@ def main() -> int:
         str(args.save_every_weights),
         "--repo-dir",
         args.repo_dir,
+        "--backend",
+        args.train_backend,
+        "--steps",
+        str(args.steps),
+        "--device",
+        args.device,
     ]
     if args.author:
         train_cmd += ["--author", args.author]

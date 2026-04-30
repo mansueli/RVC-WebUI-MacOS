@@ -1519,14 +1519,24 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1):
     log_path = pathlib.Path(now_dir, "logs", exp_name, "v3_preprocess.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    has_cuda = shutil.which("nvidia-smi") is not None
+
     if v3_source_dir and v3_source_dir.strip():
         src = v3_source_dir.strip()
-        cmd = (
-            '"%s" tools/cmd/yingmusic_experiment.py'
-            ' --source-dir "%s" --output-dir "%s" --setup-only'
-            % (config.python_cmd, src, str(isolated_dir))
-        )
-        yield "V3 Preprocess: checking YingMusic environment...\n"
+        if has_cuda:
+            cmd = (
+                '"%s" tools/cmd/yingmusic_experiment.py'
+                ' --source-dir "%s" --output-dir "%s"'
+                % (config.python_cmd, src, str(isolated_dir))
+            )
+            yield "V3 Preprocess: running YingMusic vocal isolation (CUDA)...\n"
+        else:
+            cmd = (
+                '"%s" tools/cmd/yingmusic_cpu_preprocess.py'
+                ' --source-dir "%s" --output-dir "%s"'
+                % (config.python_cmd, src, str(isolated_dir))
+            )
+            yield "V3 Preprocess: running CPU Ying-style approximation (HPSS)...\n"
         yield "Source dir:   %s\n" % src
         yield "Output dir:   %s\n" % str(isolated_dir)
     else:

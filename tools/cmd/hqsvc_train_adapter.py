@@ -18,6 +18,11 @@ Exit codes:
   0 — setup-only mode completed or training started/dispatched
   1 — prerequisite failure (missing dataset, wrong sample rate, etc.)
   2 — training runtime error after prerequisites passed
+
+Backends:
+    external — use external/HQ-SVC training scripts
+    local_experimental — use in-repo experimental trainer (CPU/GPU)
+    auto — prefer external when available, otherwise local_experimental
 """
 
 from __future__ import annotations
@@ -76,12 +81,13 @@ def _validate_prerequisites(args: argparse.Namespace, exp_dir: Path) -> list[str
             "Run Step 1 (Process data) first." % gt_wavs
         )
 
-    feature_dir = exp_dir / "3_feature768"
-    if not feature_dir.exists() or not any(feature_dir.glob("*.npy")):
-        errors.append(
-            "V3 feature files not found at '%s'. "
-            "Run Step 2 (Feature extraction) with v2/v3 feature dim first." % feature_dir
-        )
+    if args.backend == "external":
+        feature_dir = exp_dir / "3_feature768"
+        if not feature_dir.exists() or not any(feature_dir.glob("*.npy")):
+            errors.append(
+                "V3 feature files not found at '%s'. "
+                "Run Step 2 (Feature extraction) with v2/v3 feature dim first." % feature_dir
+            )
 
     return errors
 
@@ -178,6 +184,29 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="HQ-SVC training entry script path (relative to repo-dir) or 'auto'.",
     )
+    parser.add_argument(
+        "--backend",
+        default="auto",
+        choices=["auto", "external", "local_experimental"],
+        help="V3 training backend selection.",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        default="",
+        help="Optional dataset wav directory for local_experimental backend.",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=2000,
+        help="Training steps for local_experimental backend.",
+    )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cpu", "cuda", "mps"],
+        help="Execution device for local_experimental backend.",
+    )
     return parser.parse_args()
 
 
@@ -213,6 +242,7 @@ def main() -> int:
     _print("F0: %s" % args.f0)
     _print("Epochs: %s / save every %s" % (args.total_epoch, args.save_epoch))
     _print("Batch size: %s" % args.batch_size)
+    _print("Backend: %s" % args.backend)
 
     # --- Prerequisite validation ---
     errors = _validate_prerequisites(args, exp_dir)
@@ -227,7 +257,18 @@ def main() -> int:
 
     # --- HQ-SVC environment check ---
     available, reason = _check_hqsvc_env(repo_dir)
-    if not available:
+    if args.backend == "external" and not available:
+        msg = "V3 backend is set to external, but external HQ-SVC is unavailable.\n\n" + reason
+        _print(msg)
+        _write_status(status_file, "failed", msg)
+        _log.close()
+        return 2
+
+    selected_backend = args.backend
+    if selected_backend == "auto":
+        selected_backend = "external" if available else "local_experimental"
+
+    if selected_backend == "external" and not available:
         msg = (
             "V3 training environment not yet fully available.\n\n"
             + reason
@@ -241,36 +282,67 @@ def main() -> int:
         return 0  # Not a hard error — informational setup-only exit
 
     if args.setup_only:
-        _print("V3 environment validated. Ready to train.")
-        _write_status(status_file, "setup_complete", "V3 environment validated. Ready to train.")
+        _print("V3 environment validated. Ready to train with backend: %s" % selected_backend)
+        _write_status(
+            status_file,
+            "setup_complete",
+            "V3 environment validated. Ready to train with backend: %s" % selected_backend,
+        )
         _log.close()
         return 0
 
-    # --- Invoke HQ-SVC training ---
-    venv_python = repo_dir / "venv" / "bin" / "python"
-    train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_native_train.py"
+    # --- Invoke selected V3 training backend ---
+    if selected_backend == "external":
+        venv_python = repo_dir / "venv" / "bin" / "python"
+        train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_native_train.py"
+        cmd = [
+            str(venv_python),
+            str(train_launcher),
+            "--repo-dir",
+            str(repo_dir),
+            "--exp-dir",
+            str(exp_dir),
+            "--sr",
+            "48000",
+            "--f0",
+            str(args.f0),
+            "--total-epoch",
+            str(args.total_epoch),
+            "--save-epoch",
+            str(args.save_epoch),
+            "--batch-size",
+            str(args.batch_size),
+            "--save-every-weights",
+            str(args.save_every_weights),
+            "--train-entry",
+            str(args.train_entry),
+        ]
+        if args.author:
+            cmd += ["--author", args.author]
+        if args.gpus:
+            cmd += ["--gpus", args.gpus]
+    else:
+        train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_local_train.py"
+        cmd = [
+            str(sys.executable),
+            str(train_launcher),
+            "--exp-dir",
+            args.exp_dir,
+            "--sample-rate",
+            "44100",
+            "--batch-size",
+            str(max(1, int(args.batch_size))),
+            "--steps",
+            str(max(50, int(args.steps))),
+            "--author",
+            str(args.author or ""),
+            "--device",
+            args.device,
+        ]
+        if args.dataset_dir:
+            cmd += ["--dataset-dir", args.dataset_dir]
 
-    cmd = [
-        str(venv_python),
-        str(train_launcher),
-        "--repo-dir",
-        str(repo_dir),
-        "--exp-dir", str(exp_dir),
-        "--sr", "48000",
-        "--f0", str(args.f0),
-        "--total-epoch", str(args.total_epoch),
-        "--save-epoch", str(args.save_epoch),
-        "--batch-size", str(args.batch_size),
-        "--save-every-weights", str(args.save_every_weights),
-        "--train-entry",
-        str(args.train_entry),
-    ]
-    if args.author:
-        cmd += ["--author", args.author]
-    if args.gpus:
-        cmd += ["--gpus", args.gpus]
-
-    _print("Launching HQ-SVC training: %s" % " ".join(cmd))
+    _print("Launching V3 training (%s): %s" % (selected_backend, " ".join(cmd)))
     _write_status(status_file, "running", "V3 HQ-SVC training started", running=True)
 
     result = subprocess.run(cmd, cwd=str(repo_dir), stdout=_log, stderr=subprocess.STDOUT)

@@ -100,7 +100,17 @@ def build_candidate_commands(python_bin: Path, train_script: Path, args: argpars
         str(args.batch_size),
     ]
 
-    return [cmd1, cmd2]
+    cmd3 = base + [
+        "--exp-dir",
+        args.exp_dir,
+    ]
+
+    cmd4 = base + [
+        "--exp_name",
+        Path(args.exp_dir).name,
+    ]
+
+    return [cmd1, cmd2, cmd3, cmd4]
 
 
 def main() -> int:

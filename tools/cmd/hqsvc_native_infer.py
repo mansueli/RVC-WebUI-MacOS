@@ -79,7 +79,7 @@ def candidate_cmds(py: Path, script: Path, args: argparse.Namespace) -> list[lis
     output = str(Path(args.output).resolve())
     target = str(Path(args.target).resolve()) if args.target else ""
 
-    commands = [
+    commands_core = [
         [str(py), str(script), "--source", source, "--checkpoint", ckpt, "--output", output],
         [str(py), str(script), "--input", source, "--checkpoint", ckpt, "--output", output],
         [str(py), str(script), "--source", source, "--model", ckpt, "--output", output],
@@ -87,16 +87,22 @@ def candidate_cmds(py: Path, script: Path, args: argparse.Namespace) -> list[lis
     ]
 
     if target:
-        commands.insert(
+        commands_core.insert(
             0,
             [str(py), str(script), "--source", source, "--target", target, "--checkpoint", ckpt, "--output", output],
         )
 
+    commands = list(commands_core)
+
+    # Some upstream CLIs support these convenience flags; others do not.
+    commands_with_extras = [list(cmd) for cmd in commands_core]
     if args.config:
-        for cmd in commands:
+        for cmd in commands_with_extras:
             cmd.extend(["--config", str(Path(args.config).resolve())])
-    for cmd in commands:
+    for cmd in commands_with_extras:
         cmd.extend(["--cuda", args.cuda, "--fp16", args.fp16, "--expname", args.expname])
+
+    commands.extend(commands_with_extras)
 
     return commands
 
