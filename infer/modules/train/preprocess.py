@@ -16,7 +16,7 @@ noparallel = sys.argv[5] == "True"
 per = float(sys.argv[6])
 # Optional argument: when True, re-process all files even if slices already exist.
 force = len(sys.argv) > 7 and sys.argv[7] == "True"
-device_name = sys.argv[8] if len(sys.argv) > 8 else "auto"
+device_name = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else "auto"
 import os
 import traceback
 
