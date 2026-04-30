@@ -1,0 +1,3 @@
+# Python 3.10 lock-in requirements entrypoint.
+# This project is maintained for Python 3.10.x only.
+-r main.txt
