@@ -8,6 +8,7 @@ It applies HPSS and spectral gating to emphasize vocal components.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 try:
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CPU Ying-style vocal preprocessing")
     p.add_argument("--source-dir", required=True)
     p.add_argument("--output-dir", required=True)
-    p.add_argument("--target-sr", type=int, default=44100)
+    p.add_argument("--target-sr", type=int, default=48000)
     p.add_argument("--top-db", type=float, default=35.0)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     return p.parse_args()
@@ -74,13 +75,25 @@ def get_hann_window(n_fft: int, device: torch.device) -> torch.Tensor:
     return window
 
 
+def sync_device(device) -> None:
+    if torch is None or device is None:
+        return
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
 def process_file_torch(
     src: Path,
     dst: Path,
     target_sr: int,
     top_db: float,
     device: torch.device,
-) -> None:
+) -> dict[str, float]:
+    timings: dict[str, float] = {}
+
+    t0 = time.perf_counter()
     wav, sr = sf.read(str(src), always_2d=False)
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
@@ -89,11 +102,17 @@ def process_file_torch(
         if librosa is None:
             raise RuntimeError("librosa is required for resampling when sample rate differs")
         wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+    timings["load"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     x = torch.from_numpy(wav).to(device=device, dtype=torch.float32)
     n_fft = 2048
     hop = 512
     window = get_hann_window(n_fft, device)
+    sync_device(device)
+    timings["transfer"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     spec = torch.stft(
         x,
         n_fft=n_fft,
@@ -113,6 +132,10 @@ def process_file_torch(
     db = 20.0 * torch.log10(harmonic_mag / ref)
     mask = torch.sigmoid((db + top_db) / 6.0)
     filtered = spec * mask
+    sync_device(device)
+    timings["spectral"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     out = torch.istft(
         filtered,
         n_fft=n_fft,
@@ -123,14 +146,26 @@ def process_file_torch(
     )
     peak = out.abs().amax().clamp_min(1e-7)
     out = 0.95 * out / peak
+    sync_device(device)
+    timings["inverse"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     dst.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(dst), out.detach().cpu().numpy().astype(np.float32), target_sr)
+    timings["save"] = time.perf_counter() - t0
+    timings["total"] = sum(timings.values())
+    return timings
 
 
-def process_file_librosa(src: Path, dst: Path, target_sr: int, top_db: float) -> None:
+def process_file_librosa(src: Path, dst: Path, target_sr: int, top_db: float) -> dict[str, float]:
+    timings: dict[str, float] = {}
+
+    t0 = time.perf_counter()
     y, sr = librosa.load(str(src), sr=target_sr, mono=True)
+    timings["load"] = time.perf_counter() - t0
 
     # Harmonic-percussive separation keeps sustained components typical of vocals.
+    t0 = time.perf_counter()
     harmonic, _ = librosa.effects.hpss(y)
 
     # Light pre-emphasis and denoising gate.
@@ -139,13 +174,18 @@ def process_file_librosa(src: Path, dst: Path, target_sr: int, top_db: float) ->
     masked = np.zeros_like(harmonic)
     for start, end in intervals:
         masked[start:end] = harmonic[start:end]
+    timings["spectral"] = time.perf_counter() - t0
 
     # Loudness normalization.
     peak = np.max(np.abs(masked)) + 1e-7
     out = 0.95 * masked / peak
 
+    t0 = time.perf_counter()
     dst.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(dst), out.astype(np.float32), target_sr)
+    timings["save"] = time.perf_counter() - t0
+    timings["total"] = sum(timings.values())
+    return timings
 
 
 def main() -> int:
@@ -170,21 +210,47 @@ def main() -> int:
         print("[error] no audio files found in source-dir:", source_dir)
         return 1
 
+    device = choose_device(args.device)
+    backend = "torch" if device is not None else "librosa"
+    print("[timing] preprocess backend=%s device=%s files=%d" % (backend, device, len(files)))
+    total_timings = {
+        "load": 0.0,
+        "transfer": 0.0,
+        "spectral": 0.0,
+        "inverse": 0.0,
+        "save": 0.0,
+        "total": 0.0,
+    }
+
     for src in files:
         dst = output_dir / (src.stem + ".wav")
-        device = choose_device(args.device)
         if device is not None:
-            process_file_torch(src, dst, args.target_sr, args.top_db, device)
+            timings = process_file_torch(src, dst, args.target_sr, args.top_db, device)
         elif librosa is not None:
-            process_file_librosa(src, dst, args.target_sr, args.top_db)
+            timings = process_file_librosa(src, dst, args.target_sr, args.top_db)
         else:
             print("[error] Need either torch or librosa for preprocessing.")
             return 2
+        for key, value in timings.items():
+            total_timings[key] = total_timings.get(key, 0.0) + value
+        detail = ", ".join(
+            "%s=%.3fs" % (key, timings[key])
+            for key in ["load", "transfer", "spectral", "inverse", "save", "total"]
+            if key in timings
+        )
+        print("[timing] %s: %s" % (src.name, detail))
         print("[done]", dst)
 
+    total_detail = ", ".join(
+        "%s=%.3fs" % (key, total_timings[key])
+        for key in ["load", "transfer", "spectral", "inverse", "save", "total"]
+        if total_timings.get(key, 0.0) > 0.0
+    )
+    print("[timing] total: %s" % total_detail)
     print("[done] CPU Ying-style preprocessing completed:", output_dir)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+HQ-SVC

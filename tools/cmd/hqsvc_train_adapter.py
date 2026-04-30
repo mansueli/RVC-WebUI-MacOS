@@ -21,8 +21,9 @@ Exit codes:
 
 Backends:
     external — use external/HQ-SVC training scripts
+    full_paper_mode — use in-repo paper-aligned HQ-SVC scaffold
     local_experimental — use in-repo experimental trainer (CPU/GPU)
-    auto — prefer external when available, otherwise local_experimental
+    auto — prefer external when available, otherwise full_paper_mode
 """
 
 from __future__ import annotations
@@ -186,8 +187,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backend",
-        default="auto",
-        choices=["auto", "external", "local_experimental"],
+        default="full_paper_mode",
+        choices=["auto", "external", "full_paper_mode", "local_experimental"],
         help="V3 training backend selection.",
     )
     parser.add_argument(
@@ -198,8 +199,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--steps",
         type=int,
-        default=2000,
-        help="Training steps for local_experimental backend.",
+        default=6000,
+        help="Training steps for local_experimental/full_paper_mode backends.",
     )
     parser.add_argument(
         "--device",
@@ -266,7 +267,7 @@ def main() -> int:
 
     selected_backend = args.backend
     if selected_backend == "auto":
-        selected_backend = "external" if available else "local_experimental"
+        selected_backend = "external" if available else "full_paper_mode"
 
     if selected_backend == "external" and not available:
         msg = (
@@ -321,7 +322,7 @@ def main() -> int:
             cmd += ["--author", args.author]
         if args.gpus:
             cmd += ["--gpus", args.gpus]
-    else:
+    elif selected_backend == "local_experimental":
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_local_train.py"
         cmd = [
             str(sys.executable),
@@ -329,7 +330,27 @@ def main() -> int:
             "--exp-dir",
             args.exp_dir,
             "--sample-rate",
-            "44100",
+            "48000",
+            "--batch-size",
+            str(max(1, int(args.batch_size))),
+            "--steps",
+            str(max(50, int(args.steps))),
+            "--author",
+            str(args.author or ""),
+            "--device",
+            args.device,
+        ]
+        if args.dataset_dir:
+            cmd += ["--dataset-dir", args.dataset_dir]
+    else:
+        train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_full_train.py"
+        cmd = [
+            str(sys.executable),
+            str(train_launcher),
+            "--exp-dir",
+            args.exp_dir,
+            "--sample-rate",
+            "48000",
             "--batch-size",
             str(max(1, int(args.batch_size))),
             "--steps",

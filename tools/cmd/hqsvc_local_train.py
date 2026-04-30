@@ -53,16 +53,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Experimental HQ-SVC-style local trainer")
     p.add_argument("--exp-dir", required=True, help="Experiment directory under logs/")
     p.add_argument("--dataset-dir", default="", help="Directory of target singer wav files")
-    p.add_argument("--sample-rate", type=int, default=44100)
+    p.add_argument("--sample-rate", type=int, default=48000)
     p.add_argument("--encoder-sr", type=int, default=16000)
     p.add_argument("--hop-feature", type=int, default=512)
     p.add_argument("--hop-infer", type=int, default=256)
     p.add_argument("--mel-bins", type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--steps", type=int, default=2000)
-    p.add_argument("--segment-seconds", type=float, default=1.5)
-    p.add_argument("--learning-rate", type=float, default=1.5e-4)
-    p.add_argument("--save-every", type=int, default=200)
+    p.add_argument("--batch-size", type=int, default=6)
+    p.add_argument("--steps", type=int, default=5000)
+    p.add_argument("--segment-seconds", type=float, default=2.2)
+    p.add_argument("--learning-rate", type=float, default=1.0e-4)
+    p.add_argument("--save-every", type=int, default=300)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--author", default="")
     p.add_argument("--output-checkpoint", default="")
@@ -111,6 +111,13 @@ def choose_device(name: str) -> torch.device:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def sync_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
 
 
 def load_wavs(dataset_dir: Path, sample_rate: int) -> list[np.ndarray]:
@@ -262,7 +269,9 @@ def main() -> int:
         print("[error] dataset dir not found: %s" % dataset_dir)
         return 1
 
+    t0 = time.perf_counter()
     wavs = load_wavs(dataset_dir, args.sample_rate)
+    dataset_load_time = time.perf_counter() - t0
     if not wavs:
         print("[error] no wav files found in: %s" % dataset_dir)
         return 1
@@ -270,6 +279,7 @@ def main() -> int:
     device = choose_device(args.device)
     print("[info] device:", device)
     print("[info] wav files:", len(wavs))
+    print("[timing] dataset_load=%.3fs" % dataset_load_time)
 
     model = TinyHQSVC().to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.999))
@@ -279,6 +289,7 @@ def main() -> int:
     model_dir = exp_dir / "hqsvc_local"
     model_dir.mkdir(parents=True, exist_ok=True)
 
+    t0 = time.perf_counter()
     target_batch = np.stack(
         [
             random_crop(w, seg_n)
@@ -293,39 +304,63 @@ def main() -> int:
         args.mel_bins,
         args.hop_feature,
     ).mean(dim=0, keepdim=True)
+    sync_device(device)
+    print("[timing] target_stats=%.3fs" % (time.perf_counter() - t0))
 
     t0 = time.time()
+    phase_times = {
+        "batch": 0.0,
+        "forward": 0.0,
+        "ddsp": 0.0,
+        "f0": 0.0,
+        "spk": 0.0,
+        "backward": 0.0,
+    }
+    phase_steps = 0
     while global_step < args.steps:
+        phase_start = time.perf_counter()
         batch = np.stack([random_crop(random.choice(wavs), seg_n) for _ in range(args.batch_size)], axis=0)
         x = torch.from_numpy(batch).to(device).unsqueeze(1)
+        sync_device(device)
+        phase_times["batch"] += time.perf_counter() - phase_start
 
         # Denoising-consistency input for L_diff surrogate.
         noise = torch.randn_like(x) * 0.01
         x_noisy = (x + noise).clamp(-1.0, 1.0)
 
+        phase_start = time.perf_counter()
         y = model(x)
         y_noisy = model(x_noisy)
+        sync_device(device)
+        phase_times["forward"] += time.perf_counter() - phase_start
 
         y1 = y.squeeze(1)
         x1 = x.squeeze(1)
         y2 = y_noisy.squeeze(1)
 
         # L_ddsp: multi-resolution STFT magnitude distance.
+        phase_start = time.perf_counter()
         l_ddsp = 0.0
         for n_fft, hop in ((512, 128), (1024, 256), (2048, 512)):
             m_y = stft_mag(y1, n_fft=n_fft, hop=hop)
             m_x = stft_mag(x1, n_fft=n_fft, hop=hop)
             l_ddsp = l_ddsp + F.l1_loss(torch.log(m_y + 1e-6), torch.log(m_x + 1e-6))
+        sync_device(device)
+        phase_times["ddsp"] += time.perf_counter() - phase_start
 
         # L_diff: consistency under noise perturbation.
         l_diff = F.l1_loss(y1, y2)
 
         # L_f0: rough pitch contour match.
+        phase_start = time.perf_counter()
         f0_y = f0_autocorr(y1, args.sample_rate)
         f0_x = f0_autocorr(x1, args.sample_rate)
         l_f0 = F.l1_loss(torch.log(f0_y + 1e-6), torch.log(f0_x + 1e-6))
+        sync_device(device)
+        phase_times["f0"] += time.perf_counter() - phase_start
 
         # L_spk: timbre-statistics match to dataset centroid, kept on-device.
+        phase_start = time.perf_counter()
         y_stats = mel_stats_tensor(
             y1,
             args.sample_rate,
@@ -333,17 +368,27 @@ def main() -> int:
             args.hop_feature,
         )
         l_spk = F.l1_loss(y_stats.mean(dim=0, keepdim=True), target_stats)
+        sync_device(device)
+        phase_times["spk"] += time.perf_counter() - phase_start
 
         loss = 1.0 * l_ddsp + 0.2 * l_diff + 0.1 * l_spk + 0.2 * l_f0
 
+        phase_start = time.perf_counter()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
+        sync_device(device)
+        phase_times["backward"] += time.perf_counter() - phase_start
 
         global_step += 1
+        phase_steps += 1
         if global_step % 20 == 0:
             elapsed = time.time() - t0
+            avg_phase = ", ".join(
+                "%s=%.1fms" % (key, (phase_times[key] / max(1, phase_steps)) * 1000.0)
+                for key in ["batch", "forward", "ddsp", "f0", "spk", "backward"]
+            )
             print(
                 "[step %d/%d] loss=%.4f ddsp=%.4f diff=%.4f spk=%.4f f0=%.4f time=%.1fs"
                 % (
@@ -357,8 +402,13 @@ def main() -> int:
                     elapsed,
                 )
             )
+            print("[timing] avg_per_step %s" % avg_phase)
+            for key in phase_times:
+                phase_times[key] = 0.0
+            phase_steps = 0
 
         if global_step % args.save_every == 0 or global_step == args.steps:
+            save_start = time.perf_counter()
             ckpt = {
                 "model": model.state_dict(),
                 "sample_rate": args.sample_rate,
@@ -373,8 +423,10 @@ def main() -> int:
             path = model_dir / ("G_%d.pt" % global_step)
             torch.save(ckpt, str(path))
             print("[save]", path)
+            print("[timing] checkpoint_save=%.3fs" % (time.perf_counter() - save_start))
 
     final_path = Path(args.output_checkpoint).resolve() if args.output_checkpoint else (model_dir / "G_latest.pt")
+    save_start = time.perf_counter()
     torch.save(
         {
             "model": model.state_dict(),
@@ -389,6 +441,7 @@ def main() -> int:
         },
         str(final_path),
     )
+    print("[timing] final_checkpoint_save=%.3fs" % (time.perf_counter() - save_start))
 
     meta = {
         "experiment": args.exp_dir,

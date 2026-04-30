@@ -1070,6 +1070,7 @@ def click_train(
     gpus16,
     if_cache_gpu17,
     if_save_every_weights18,
+    v3_train_backend19,
     version19,
     author,
     run_async=True,
@@ -1086,6 +1087,7 @@ def click_train(
             if_save_every_weights18,
             gpus16,
             author,
+            v3_train_backend19,
             run_async=run_async,
         )
 
@@ -1398,6 +1400,7 @@ def train1key(
     gpus16,
     if_cache_gpu17,
     if_save_every_weights18,
+    v3_train_backend19,
     version19,
     author,
 ):
@@ -1470,6 +1473,7 @@ def train1key(
         gpus16,
         if_cache_gpu17,
         if_save_every_weights18,
+        v3_train_backend19,
         version19,
         author,
         run_async=False,
@@ -1507,7 +1511,7 @@ def change_info_(ckpt_path):
 # V3 (HQ-SVC-oriented) backend functions
 # ---------------------------------------------------------------------------
 
-def v3_preprocess_dataset(v3_source_dir, exp_dir1):
+def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
     """Run YingMusic vocal isolation for V3 dataset preparation.
 
     Invokes yingmusic_experiment.py in setup-only mode (environment check) or
@@ -1520,32 +1524,40 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1):
     log_path = pathlib.Path(now_dir, "logs", exp_name, "v3_preprocess.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
+    preprocess_backend = (v3_preprocess_backend or "full_paper_mode").strip()
     has_cuda = shutil.which("nvidia-smi") is not None
 
     if v3_source_dir and v3_source_dir.strip():
         src = v3_source_dir.strip()
-        if has_cuda:
+        if preprocess_backend == "external_yingmusic" and has_cuda:
             cmd = (
                 '"%s" tools/cmd/yingmusic_experiment.py'
                 ' --source-dir "%s" --output-dir "%s"'
                 % (config.python_cmd, src, str(isolated_dir))
             )
             yield "V3 Preprocess: running YingMusic vocal isolation (CUDA)...\n"
-        else:
+        elif preprocess_backend == "cpu_fallback":
             cmd = (
                 '"%s" tools/cmd/yingmusic_cpu_preprocess.py'
-                ' --source-dir "%s" --output-dir "%s"'
+                ' --source-dir "%s" --output-dir "%s" --device auto'
                 % (config.python_cmd, src, str(isolated_dir))
             )
-            yield "V3 Preprocess: running CPU Ying-style approximation (HPSS)...\n"
+            yield "V3 Preprocess: running CPU/MPS fallback isolation...\n"
+        else:
+            cmd = (
+                '"%s" tools/cmd/yingmusic_paper_preprocess.py'
+                ' --source-dir "%s" --output-dir "%s" --backend "%s" --device auto'
+                % (config.python_cmd, src, str(isolated_dir), preprocess_backend)
+            )
+            yield "V3 Preprocess: running paper-mode neural isolation with fallback...\n"
         yield "Source dir:   %s\n" % src
         yield "Output dir:   %s\n" % str(isolated_dir)
     else:
         cmd = (
-            '"%s" tools/cmd/yingmusic_experiment.py --setup-only'
-            % config.python_cmd
+            '"%s" tools/cmd/yingmusic_paper_preprocess.py --setup-only --backend "%s" --device auto'
+            % (config.python_cmd, preprocess_backend)
         )
-        yield "V3 Preprocess: checking YingMusic environment (no source dir specified)...\n"
+        yield "V3 Preprocess: checking paper-mode preprocessing environment...\n"
 
     logger.info("V3 preprocess execute: " + cmd)
     log_f = open(log_path, "w", encoding="utf-8")
@@ -1585,6 +1597,7 @@ def click_train_v3(
     if_save_every_weights18,
     gpus16,
     author,
+    v3_train_backend,
     run_async=True,
 ):
     """Dispatch V3 training to the HQ-SVC training adapter.
@@ -1617,6 +1630,7 @@ def click_train_v3(
         ' --save-epoch %s'
         ' --batch-size %s'
         ' --save-every-weights %s'
+        ' --backend "%s"'
         ' --author "%s"'
         ' --status-file "%s"'
         % (
@@ -1628,6 +1642,7 @@ def click_train_v3(
             save_epoch10,
             batch_size12,
             save_weights_flag,
+            v3_train_backend or "full_paper_mode",
             author,
             str(artifacts["status_file"]),
         )
@@ -2148,6 +2163,18 @@ with gr.Blocks(title="RVC WebUI") as app:
                         ),
                         placeholder=i18n("Leave empty to only check environment readiness"),
                     )
+                    v3_preprocess_backend4 = gr.Radio(
+                        label=i18n("V3 preprocess backend"),
+                        choices=["full_paper_mode", "paper_auto", "cpu_fallback", "external_yingmusic"],
+                        value="full_paper_mode",
+                        interactive=True,
+                    )
+                    v3_train_backend19 = gr.Radio(
+                        label=i18n("V3 training backend"),
+                        choices=["full_paper_mode", "local_experimental", "external", "auto"],
+                        value="full_paper_mode",
+                        interactive=True,
+                    )
                     but_v3_preprocess = gr.Button(
                         i18n("Check / Run V3 Vocal Isolation (YingMusic)"),
                         variant="secondary",
@@ -2160,7 +2187,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     )
                     but_v3_preprocess.click(
                         v3_preprocess_dataset,
-                        [v3_source_dir4, exp_dir1],
+                        [v3_source_dir4, exp_dir1, v3_preprocess_backend4],
                         [info_v3_preprocess],
                         api_name="v3_preprocess",
                     )
@@ -2367,6 +2394,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         gpus16,
                         if_cache_gpu17,
                         if_save_every_weights18,
+                        v3_train_backend19,
                         version19,
                         author,
                     ],
@@ -2408,6 +2436,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         gpus16,
                         if_cache_gpu17,
                         if_save_every_weights18,
+                        v3_train_backend19,
                         version19,
                         author,
                     ],
