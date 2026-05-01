@@ -199,7 +199,7 @@ def lookup_names(weight_root):
         logger.warning("Weight root does not exist: %s", weight_root)
         return
     for name in os.listdir(weight_root):
-        if name.endswith(".pth"):
+        if name.endswith(".pth") or name.endswith(".pt"):
             names.append(name)
 
 
@@ -468,17 +468,41 @@ def suggest_default_experiment_name():
 default_exp_dir = suggest_default_experiment_name()
 
 
-def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None):
+def _resolve_preprocess_input_dir(trainset_dir, exp_dir, version19=None):
+    trainset_dir = (trainset_dir or "").strip()
+    if trainset_dir:
+        return trainset_dir, None
+    if version19 == "v3":
+        v3_isolated_dir = pathlib.Path(now_dir, "logs", exp_dir, "v3_isolated")
+        if v3_isolated_dir.exists() and any(v3_isolated_dir.glob("*.wav")):
+            return str(v3_isolated_dir), (
+                "V3 preprocess source auto-selected: %s\n"
+                "Using isolated vocals from V3 preprocessing as the Step 1 slicing input."
+                % v3_isolated_dir
+            )
+    return trainset_dir, None
+
+
+def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None, version19=None):
     sr = sr_dict[sr]
     exp_path = pathlib.Path(now_dir, "logs", exp_dir)
     os.makedirs(exp_path, exist_ok=True)
     log_file_path = exp_path / "preprocess.log"
     f = open(log_file_path, "w")
     f.close()
+    resolved_trainset_dir, resolved_note = _resolve_preprocess_input_dir(
+        trainset_dir, exp_dir, version19
+    )
+    if not resolved_trainset_dir:
+        yield (
+            "Training folder is empty. "
+            "For V3, run V3 preprocess first or provide a dataset folder for Step 1 slicing."
+        )
+        return
     force_preprocess = str(preprocess_mode) == i18n("Full rebuild (reprocess all files)")
     cmd = '"%s" infer/modules/train/preprocess.py "%s" %s %s "%s" %s %.1f %s "%s"' % (
         config.python_cmd,
-        trainset_dir,
+        resolved_trainset_dir,
         sr,
         n_p,
         str(exp_path),
@@ -501,14 +525,21 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p, preprocess_mode=None):
     ).start()
     while 1:
         with open(log_file_path, "r") as f:
-            yield (f.read())
+            log = f.read()
+        if resolved_note:
+            yield resolved_note + "\n" + log
+        else:
+            yield log
         sleep(1)
         if done[0]:
             break
     with open(log_file_path, "r") as f:
         log = f.read()
     logger.info(log)
-    yield log
+    if resolved_note:
+        yield resolved_note + "\n" + log
+    else:
+        yield log
 
 
 # but2.click(extract_f0,[gpus6,np7,f0method8,if_f0_3,trainset_dir4],[info2])
@@ -1071,8 +1102,10 @@ def click_train(
     if_cache_gpu17,
     if_save_every_weights18,
     v3_train_backend19,
+    v3_enable_rvc_stage2,
     version19,
     author,
+    v3_train_preset="base_model",
     run_async=True,
 ):
     # V3 uses the HQ-SVC-oriented training adapter, not the RVC trainer.
@@ -1088,6 +1121,8 @@ def click_train(
             gpus16,
             author,
             v3_train_backend19,
+            v3_enable_rvc_stage2,
+            v3_train_preset=v3_train_preset,
             run_async=run_async,
         )
 
@@ -1401,8 +1436,10 @@ def train1key(
     if_cache_gpu17,
     if_save_every_weights18,
     v3_train_backend19,
+    v3_enable_rvc_stage2,
     version19,
     author,
+    v3_train_preset="base_model",
 ):
     infos = []
 
@@ -1432,6 +1469,7 @@ def train1key(
                 sr2,
                 np7,
                 preprocess_mode8,
+                version19,
             )
         ]
 
@@ -1474,8 +1512,10 @@ def train1key(
         if_cache_gpu17,
         if_save_every_weights18,
         v3_train_backend19,
+        v3_enable_rvc_stage2,
         version19,
         author,
+        v3_train_preset,
         run_async=False,
     )
     yield get_info_str(train_result)
@@ -1552,6 +1592,7 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
             yield "V3 Preprocess: running paper-mode neural isolation with fallback...\n"
         yield "Source dir:   %s\n" % src
         yield "Output dir:   %s\n" % str(isolated_dir)
+        yield "Next step: Step 1 'Process data' will slice these isolated vocals into short training chunks.\n"
     else:
         cmd = (
             '"%s" tools/cmd/yingmusic_paper_preprocess.py --setup-only --backend "%s" --device auto'
@@ -1587,7 +1628,33 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
         yield log + "\n[V3 Preprocess] Finished (exit code %s)." % rc
 
 
-def click_train_v3(
+_V3_PRESETS = {
+    "base_model": {
+        "total_epoch": 600,
+        "save_epoch": 25,
+        "batch_size": 6,
+        "lr": 1.0e-4,
+        "segment_seconds": 2.8,
+        "label": "Base Model — from scratch, long run, lower LR",
+    },
+    "fine_tune": {
+        "total_epoch": 100,
+        "save_epoch": 10,
+        "batch_size": 4,
+        "lr": 3.0e-5,
+        "segment_seconds": 2.0,
+        "label": "Fine Tune — short adaptation from existing checkpoint, low LR",
+    },
+}
+
+
+def v3_apply_preset(preset_name: str):
+    """Return updated slider values for the chosen V3 training preset."""
+    p = _V3_PRESETS.get(preset_name or "base_model", _V3_PRESETS["base_model"])
+    return p["total_epoch"], p["save_epoch"], p["batch_size"]
+
+
+def _launch_v3_training(
     exp_dir1,
     sr2,
     if_f0_3,
@@ -1598,6 +1665,8 @@ def click_train_v3(
     gpus16,
     author,
     v3_train_backend,
+    v3_train_preset="base_model",
+    v3_stage="1",
     run_async=True,
 ):
     """Dispatch V3 training to the HQ-SVC training adapter.
@@ -1620,6 +1689,15 @@ def click_train_v3(
 
     f0_flag = 1 if _is_f0_enabled(if_f0_3) else 0
     save_weights_flag = 1 if if_save_every_weights18 == i18n("Yes") else 0
+    try:
+        epoch_count = int(total_epoch11)
+    except Exception:
+        epoch_count = 0
+    _preset_cfg = _V3_PRESETS.get(v3_train_preset or "base_model", _V3_PRESETS["base_model"])
+    _steps_floor = 1500 if (v3_train_preset == "fine_tune") else 4000
+    v3_steps = max(_steps_floor, min(20000, epoch_count * 12))
+    v3_lr = _preset_cfg["lr"]
+    v3_stage = str(v3_stage or "1")
 
     adapter_cmd = (
         '"%s" tools/cmd/hqsvc_train_adapter.py'
@@ -1630,6 +1708,9 @@ def click_train_v3(
         ' --save-epoch %s'
         ' --batch-size %s'
         ' --save-every-weights %s'
+        ' --steps %s'
+        ' --learning-rate %s'
+        ' --stage %s'
         ' --backend "%s"'
         ' --author "%s"'
         ' --status-file "%s"'
@@ -1642,6 +1723,9 @@ def click_train_v3(
             save_epoch10,
             batch_size12,
             save_weights_flag,
+            v3_steps,
+            v3_lr,
+            v3_stage,
             v3_train_backend or "full_paper_mode",
             author,
             str(artifacts["status_file"]),
@@ -1682,18 +1766,86 @@ def click_train_v3(
             )
         TRAINING_PROCESSES[exp_dir1] = p
         artifacts["pid_file"].write_text(str(p.pid), encoding="utf-8")
+        stage_label = {
+            "1": "V3 Stage 1",
+            "2": "V3 Stage 2",
+            "both": "V3 Stage 1 + Stage 2",
+        }.get(v3_stage, "V3 training")
         return (
-            "V3 training adapter started in background (PID %s).\n"
+            "%s adapter started in background (PID %s).\n"
             "The adapter validates prerequisites, checks HQ-SVC environment, and "
             "launches training if available.\n"
-            "Logs: %s" % (p.pid, artifacts["log_file"])
+            "Logs: %s" % (stage_label, p.pid, artifacts["log_file"])
         )
 
     rc = subprocess.run(supervisor_cmd, shell=True, cwd=now_dir).returncode
     final_msg = get_training_status(exp_dir1)
     if rc == 0:
-        return "V3 training adapter complete.\n" + final_msg
-    return "V3 training adapter finished with errors.\n" + final_msg
+        return "V3 adapter complete.\n" + final_msg
+    return "V3 adapter finished with errors.\n" + final_msg
+
+
+def click_train_v3(
+    exp_dir1,
+    sr2,
+    if_f0_3,
+    save_epoch10,
+    total_epoch11,
+    batch_size12,
+    if_save_every_weights18,
+    gpus16,
+    author,
+    v3_train_backend,
+    v3_enable_rvc_stage2,
+    v3_train_preset="base_model",
+    run_async=True,
+):
+    stage = "both" if v3_enable_rvc_stage2 else "1"
+    return _launch_v3_training(
+        exp_dir1,
+        sr2,
+        if_f0_3,
+        save_epoch10,
+        total_epoch11,
+        batch_size12,
+        if_save_every_weights18,
+        gpus16,
+        author,
+        v3_train_backend,
+        v3_train_preset=v3_train_preset,
+        v3_stage=stage,
+        run_async=run_async,
+    )
+
+
+def click_train_v3_stage2(
+    exp_dir1,
+    sr2,
+    if_f0_3,
+    save_epoch10,
+    total_epoch11,
+    batch_size12,
+    if_save_every_weights18,
+    gpus16,
+    author,
+    v3_train_backend,
+    v3_train_preset="base_model",
+):
+    return _launch_v3_training(
+        exp_dir1,
+        sr2,
+        if_f0_3,
+        save_epoch10,
+        total_epoch11,
+        batch_size12,
+        if_save_every_weights18,
+        gpus16,
+        author,
+        v3_train_backend,
+        v3_train_preset=v3_train_preset,
+        v3_stage="2",
+        run_async=True,
+    )
 
 
 with gr.Blocks(title="RVC WebUI") as app:
@@ -2175,6 +2327,26 @@ with gr.Blocks(title="RVC WebUI") as app:
                         value="full_paper_mode",
                         interactive=True,
                     )
+                    v3_train_preset_radio = gr.Radio(
+                        label=i18n("V3 training preset"),
+                        choices=["base_model", "fine_tune"],
+                        value="base_model",
+                        interactive=True,
+                        info=i18n(
+                            "base_model: 600 epochs, lr=1e-4 — train from scratch.\n"
+                            "fine_tune: 100 epochs, lr=3e-5 — short adaptation from a checkpoint."
+                        ),
+                    )
+                    v3_enable_rvc_stage2 = gr.Checkbox(
+                        label=i18n("Enable RVC Discriminator Fine-Tune (Stage 2)"),
+                        value=True,
+                        interactive=True,
+                        info=i18n("Recommended final polishing step for V3 full-paper-mode training."),
+                    )
+                    but_v3_stage2 = gr.Button(
+                        i18n("Run V3 RVC Fine-Tune (Stage 2)"),
+                        variant="secondary",
+                    )
                     but_v3_preprocess = gr.Button(
                         i18n("Check / Run V3 Vocal Isolation (YingMusic)"),
                         variant="secondary",
@@ -2223,7 +2395,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     info1 = gr.Textbox(label=i18n("Output information"), value="")
                     but1.click(
                         preprocess_dataset,
-                        [trainset_dir4, exp_dir1, sr2, np7, preprocess_mode8],
+                        [trainset_dir4, exp_dir1, sr2, np7, preprocess_mode8, version19],
                         [info1],
                         api_name="train_preprocess",
                     )
@@ -2334,6 +2506,11 @@ with gr.Blocks(title="RVC WebUI") as app:
                         value=i18n("Yes"),
                         interactive=True,
                     )
+                    v3_train_preset_radio.change(
+                        v3_apply_preset,
+                        [v3_train_preset_radio],
+                        [total_epoch11, save_epoch10, batch_size12],
+                    )
                 with gr.Column():
                     pretrained_G14 = gr.Textbox(
                         label=i18n("Load pre-trained base model G path"),
@@ -2395,8 +2572,10 @@ with gr.Blocks(title="RVC WebUI") as app:
                         if_cache_gpu17,
                         if_save_every_weights18,
                         v3_train_backend19,
+                        v3_enable_rvc_stage2,
                         version19,
                         author,
+                        v3_train_preset_radio,
                     ],
                     info3,
                     api_name="train_start",
@@ -2413,6 +2592,24 @@ with gr.Blocks(title="RVC WebUI") as app:
                     [exp_dir1],
                     info3,
                     api_name="train_stop_graceful",
+                )
+                but_v3_stage2.click(
+                    click_train_v3_stage2,
+                    [
+                        exp_dir1,
+                        sr2,
+                        if_f0_3,
+                        save_epoch10,
+                        total_epoch11,
+                        batch_size12,
+                        if_save_every_weights18,
+                        gpus16,
+                        author,
+                        v3_train_backend19,
+                        v3_train_preset_radio,
+                    ],
+                    info3,
+                    api_name="v3_train_stage2",
                 )
                 but5.click(
                     train1key,
@@ -2437,8 +2634,10 @@ with gr.Blocks(title="RVC WebUI") as app:
                         if_cache_gpu17,
                         if_save_every_weights18,
                         v3_train_backend19,
+                        v3_enable_rvc_stage2,
                         version19,
                         author,
+                        v3_train_preset_radio,
                     ],
                     info3,
                     api_name="train_start_all",

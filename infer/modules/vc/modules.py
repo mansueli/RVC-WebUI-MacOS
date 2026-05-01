@@ -32,6 +32,27 @@ class VC:
 
         self.config = config
 
+    def _load_native_v3_checkpoint(self, ckpt_path: str):
+        try:
+            payload = torch.load(ckpt_path, map_location="cpu")
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if "model" not in payload:
+            return None
+        if "sample_rate" not in payload and "training_stage" not in payload:
+            return None
+
+        self.net_g = None
+        self.cpt = payload
+        self.tgt_sr = int(payload.get("sample_rate", 48000))
+        self.if_f0 = 1
+        self.version = "v3"
+        self.pipeline = None
+        self.hubert_model = None
+        return payload
+
     def get_vc(self, sid, *to_return_protect):
         logger.info("Get sid: " + sid)
 
@@ -89,11 +110,18 @@ class VC:
         logger.info(f"Loading: {person}")
         self.model_path = person
 
-        self.net_g, self.cpt = load_synthesizer(person, self.config.device)
-        self.tgt_sr = self.cpt["config"][-1]
-        self.cpt["config"][-3] = self.cpt["weight"]["emb_g.weight"].shape[0]  # n_spk
-        self.if_f0 = self.cpt.get("f0", 1)
-        self.version = self.cpt.get("version", "v1")
+        native_payload = None
+        try:
+            self.net_g, self.cpt = load_synthesizer(person, self.config.device)
+            self.tgt_sr = self.cpt["config"][-1]
+            self.cpt["config"][-3] = self.cpt["weight"]["emb_g.weight"].shape[0]  # n_spk
+            self.if_f0 = self.cpt.get("f0", 1)
+            self.version = self.cpt.get("version", "v1")
+        except Exception:
+            native_payload = self._load_native_v3_checkpoint(person)
+            if native_payload is None:
+                raise
+            logger.info("Loaded native V3 checkpoint without RVC synthesizer format: %s", person)
 
         if self.version == "v3":
             logger.info(
@@ -101,13 +129,28 @@ class VC:
                 "Set RVC_V3_BACKEND=fallback to force RVC compatibility inference."
             )
 
-        if self.config.is_half:
-            self.net_g = self.net_g.half()
-        else:
-            self.net_g = self.net_g.float()
-        self.pipeline = Pipeline(self.tgt_sr, self.config)
+        if self.net_g is not None:
+            if self.config.is_half:
+                self.net_g = self.net_g.half()
+            else:
+                self.net_g = self.net_g.float()
+            self.pipeline = Pipeline(self.tgt_sr, self.config)
 
-        n_spk = self.cpt["config"][-3]
+        if native_payload is not None:
+            n_spk = int(native_payload.get("speaker_count", 1))
+            model_info = (
+                "Native V3 checkpoint loaded. "
+                "stage=%s, sample_rate=%s, fine_tuned=%s"
+                % (
+                    native_payload.get("training_stage", "1"),
+                    native_payload.get("sample_rate", self.tgt_sr),
+                    bool(native_payload.get("discriminator")),
+                )
+            )
+        else:
+            n_spk = self.cpt["config"][-3]
+            model_info = show_model_info(self.cpt)
+
         index = {"value": get_index_path_from_model(sid), "__type__": "update"}
         logger.info("Select index: " + index["value"])
 
@@ -118,7 +161,7 @@ class VC:
                 to_return_protect1,
                 index,
                 index,
-                show_model_info(self.cpt),
+                model_info,
             )
             if to_return_protect
             else {"visible": True, "maximum": n_spk, "__type__": "update"}
@@ -153,6 +196,12 @@ class VC:
             local_launcher = os.path.join("tools", "cmd", "hqsvc_local_infer.py")
 
             if backend_mode == "fallback":
+                if self.net_g is None or self.pipeline is None:
+                    return (
+                        "V3 fallback inference requires an RVC-format checkpoint. "
+                        "Selected checkpoint is native Stage 1/2 format, so use native backend.",
+                        None,
+                    )
                 logger.info("RVC_V3_BACKEND=fallback set. Using RVC compatibility path.")
             else:
                 with tempfile.NamedTemporaryFile(

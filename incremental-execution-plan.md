@@ -228,274 +228,112 @@ Exit criteria:
 - at least one performance or quality improvement is measurable and repeatable
 - improvements can be reverted independently if they regress quality
 
-## Phase 5: Experimental V3 Research Track ← ACTIVE FOCUS
+### Phase 5: Experimental V3 Research Track ← ACTIVE FOCUS (Updated with RVC Discriminator Design)
 
-Objective:
+**Objective:**  
+Ship a fully WebUI-native V3 workflow that implements the **HQ-SVC paper architecture (`FullHQSVC`) + RVC MultiPeriodDiscriminator adversarial fine-tuning** as the final polishing step, while keeping v1/v2 100 % stable.
 
-- ship a usable V3 workflow inside WebUI (not as external scripts)
-- keep v1/v2 fully stable on the current RVC backend while V3 uses an HQ-SVC-oriented backend
-- standardize V3 data flow around YingMusic preprocessing and a fixed 48k WebUI training target
-
-Scope boundary:
-
-- v3 in this fork is singing-focused by design
-- speech-oriented conversion remains supported through v1/v2 paths and is not a v3 optimization target
-
-Architecture rule for this phase:
-
-- v1/v2 backend: existing RVC training/inference pipeline (unchanged by default)
-- v3 backend: HQ-SVC-oriented training/inference pipeline, routed explicitly in WebUI
-- no cross-coupling where v3 model loading depends on v1/v2 internals
-
-Entry gate (must be complete before any active implementation here):
-
-- a minimal benchmark harness exists for the relevant inference path (can be implemented now as a narrow pre-Phase-4 slice)
-- each sub-track is isolated behind a flag, separate branch, or experimental script
-- no v3 work lands in `main` until it passes the Phase 2 smoke suite
-
----
-
-### V3 Implementation Plan (WebUI-Native)
-
-Goal:
-
-- make V3 fully executable from WebUI as a first-class workflow
-- include YingMusic preprocessing inside the V3 path
-- support HQ-SVC-style train/fine-tune/inference for V3
-- preserve current v1/v2 behavior and compatibility
-
-Core V3 pipeline:
-
-```
 User audio / dataset input
-    -> V3 preprocess in WebUI (YingMusic vocal isolation)
-    -> Dataset prep with V3 preset (fixed 48k, enforced resample/filter policy)
-    -> V3 train/fine-tune backend (HQ-SVC-oriented)
-    -> V3 inference backend (HQ-SVC-oriented)
-```
+→ V3 preprocess in WebUI (YingMusic vocal isolation)
+→ Dataset prep with V3 preset (fixed 48k, enforced resample/filter policy)
+→ Stage 1: HQ-SVC paper training (FullHQSVC with FACodec/EVA/DDSP/diffusion + paper losses)
+→ Stage 2: RVC MultiPeriodDiscriminator adversarial fine-tuning (generator + feature-matching loss)
+→ V3 inference backend (loads fine-tuned checkpoint)
 
-### Lanes And Milestones
+**Architecture rule (unchanged):**  
+- v1/v2 backend: existing RVC training/inference pipeline (untouched)  
+- v3 backend: dedicated HQ-SVC-oriented path using `FullHQSVC` + optional RVC fine-tune stage  
+- No cross-coupling; v3 is explicitly routed
+
+**New design principles added:**
+- Stage 2 (RVC discriminator fine-tuning) is optional but recommended as the final quality step.
+- `FullHQSVC` and `MultiPeriodDiscriminator` live in new dedicated modules under `tools/cmd/`.
+- All MPS/Apple Silicon paths remain first-class and resumable at both stages.
+- Stage 2 can be triggered via a **separate “RVC Fine-Tune (Stage 2)” button** in the WebUI (in addition to the combined two-stage flow).
 
 #### Lane A — Routing And UX Contracts (must land first)
 
-Objective:
-
-- make version selection deterministic in WebUI routing
-
 Work items:
-
-1. Keep `v1`/`v2` mapped to current RVC train/infer stack
-2. Map `v3` to a dedicated backend path, not mixed with v1/v2 internals
-3. Keep V3 sample rate fixed at 48k in UI and training command generation
-4. Hide or disable incompatible RVC-only controls when V3 is active
-
-Exit criteria:
-
-- choosing `v3` always routes to V3 command builders
-- choosing `v1`/`v2` remains behaviorally unchanged
+1. Keep `v1`/`v2` → RVC, `v3` → HQ-SVC backend.
+2. Add UI toggle / **separate button** “Enable RVC Discriminator Fine-Tune (Stage 2)” when `version19 == "v3"`.
+3. Enforce 48k sample-rate lock for all V3 paths.
 
 #### Lane B — V3 Preprocess Integration (YingMusic baked in)
 
-Objective:
+*(unchanged — already aligns perfectly)*
 
-- remove dependency on external manual preprocessing for V3
-
-Work items:
-
-1. Add a V3 preprocess action in WebUI that invokes YingMusic workflow
-2. Persist isolated vocals in a deterministic experiment folder
-3. Feed isolated outputs directly into dataset prep
-4. Keep provenance manifest generation enabled by default
-5. Enforce V3 preset in dataset prep (48k + resample + filter defaults)
-
-Exit criteria:
-
-- V3 preprocessing can be launched and monitored from WebUI
-- processed files are ready for immediate V3 training without manual path juggling
-
-#### Lane C — V3 Training Backend (HQ-SVC-oriented)
-
-Objective:
-
-- enable V3 fine-tuning flow on HQ-SVC-style runtime path
+#### Lane C — V3 Training Backend (HQ-SVC-oriented + RVC fine-tune) ← MAJOR UPDATE
 
 Work items:
-
-1. Add a dedicated V3 training adapter module/command
-2. Keep V3 checkpoint and log layout separate from v1/v2
-3. Add resumable status and stop controls aligned with existing training supervisor behavior
-4. Add preflight checks for required V3 assets/environment before train start
-
-Exit criteria:
-
-- WebUI can start/monitor/stop V3 training
-- V3 training no longer depends on v1/v2-specific assumptions
+1. Create `tools/cmd/FullHQSVC.py` — the paper-aligned `FullHQSVC` class (FACodec frozen, EVA, DDSP, WaveNet denoiser, NSF-HiFiGAN).
+2. Create `tools/cmd/rvc_discriminator.py` — exact RVC `MultiPeriodDiscriminator` + `PeriodDiscriminator`.
+3. Extend `FullHQSVC` with `enable_rvc_fine_tune_mode()` and `compute_rvc_adv_losses()`.
+4. Create `tools/cmd/hqsvc_train_adapter.py` — orchestrates **two-stage training**:
+   - Stage 1: paper losses + AdamW (lr=1.5e-4)
+   - Stage 2: low-lr adversarial + feature-matching (RVC disc) + weighted paper losses
+5. Add `--stage 1|2` flag and support for the separate WebUI “RVC Fine-Tune” button.
+6. Reuse existing training supervisor for start/stop/status.
 
 #### Lane D — V3 Inference Backend (HQ-SVC-oriented)
 
-Objective:
-
-- ensure V3 models can be loaded and tested from WebUI after training
-
 Work items:
-
-1. Add V3 model load/infer route that does not rely on v1/v2-specific loaders
-2. Keep backward compatibility in existing RVC loaders for v1/v2
-3. Provide clear model info/status for V3 checkpoints in UI
-
-Exit criteria:
-
-- V3 checkpoints can be selected and inferred directly in WebUI
-- v1/v2 inference remains unaffected
+1. Add V3 dispatch in `infer/modules/vc/modules.py` that loads `FullHQSVC` checkpoint (Stage 2 fine-tuned weights preferred).
+2. Update `rvc/synthesizer.py` with a non-intrusive V3 compatibility path.
+3. Show “RVC Fine-Tuned” badge in UI when checkpoint contains discriminator state.
 
 #### Lane E — Assets, Validation, And Rollout
 
-Objective:
-
-- make V3 operationally reliable, not just functionally present
-
 Work items:
-
-1. Add V3 asset readiness checks and optional download/bootstrap helpers
-2. Add smoke tests for V3 routing, preprocess command construction, and backend dispatch
-3. Keep full Phase 2 smoke suite green
-4. Update docs for V3 flow and compatibility matrix
-
-Exit criteria:
-
-- V3 path is testable on clean setups with clear actionable errors
-- CI catches V3 routing/preprocess regressions
-
-### Progress update (implemented in this fork)
-
-- Added `tools/cmd/hqsvc_training_simulation.py` to generate HQ-SVC-aligned simulation blueprints
-- Added `--resample-if-needed` and `--v3-preset` in `training_data/prepare_rvc_dataset.py`
-- Added V3 sample-rate enforcement behavior in WebUI (`v3` -> 48k only)
-- Added V3 compatibility fallback in `rvc/synthesizer.py` for model-loading continuity
-
-### Activation Constraints
-
-- HQ-SVC full training integration depends on a stable, validated training path in the selected runtime environment
-- local macOS remains first-class for orchestration/preprocess and lightweight validation; heavier train runs may require dedicated compute depending on backend requirements
+1. Extend `tools/download_models.py` with V3 assets (FACodec, RMVPE, optional NSF-HiFiGAN, YingMusic RoFormer checkpoint).
+2. Add preflight checks for both training stages.
+3. Add `tests/test_v3_full_pipeline_smoke.py` covering routing, preprocess, Stage 1 → Stage 2 hand-off, and separate fine-tune button.
+4. Update `README.md` and `docs/en/` with V3 quickstart that mentions “RVC Discriminator Fine-Tuning (recommended final step via dedicated button)”.
 
 ### Phase 5 Definition Of Done
 
 All items below must be true:
 
-1. V3 preprocess, train/fine-tune, and inference are all executable from WebUI
-2. YingMusic preprocessing is part of V3 workflow (not an external manual-only requirement)
-3. V3 uses fixed 48k training target and explicit data policy
-4. v1/v2 continue to use existing RVC backend without regressions
-5. V3 smoke coverage exists and Phase 2 baseline tests still pass
+1. V3 preprocess, **Stage 1 (HQ-SVC paper training)**, **Stage 2 (RVC MultiPeriodDiscriminator adversarial fine-tuning)**, and inference are all executable from WebUI.  
+   Stage 2 is available both as part of a combined two-stage flow **and** via a **separate “RVC Fine-Tune (Stage 2)” button** in the WebUI.
+2. The `FullHQSVC` model fully implements the HQ-SVC paper architecture and supports seamless hand-off to the RVC discriminator for the final adversarial polishing step.
+3. YingMusic preprocessing is part of the V3 workflow (not an external manual-only requirement).
+4. V3 uses fixed 48k training target and explicit data policy.
+5. v1/v2 continue to use existing RVC backend without any regressions.
+6. V3 smoke coverage (including Stage 1 → Stage 2 hand-off **and** the separate fine-tune button) exists and Phase 2 baseline tests still pass.
+7. RVC MultiPeriodDiscriminator fine-tuning is exposed as the recommended final polishing step, accessible via the dedicated UI button.
 
-### Phase 5 Execution Checklist (Implementation-Ready)
-
-This checklist translates Lanes A-E into concrete file edits and acceptance tests.
+### Phase 5 Execution Checklist (Implementation-Ready — Updated)
 
 #### Lane A Checklist — Routing And UX Contracts
-
-File-level tasks:
-
-1. `web.py`
-   - centralize version routing into explicit helpers (`v1|v2 -> rvc`, `v3 -> hqsvc`)
-   - enforce V3 sample-rate lock at all train entry points (train + one-click train)
-   - hide/disable incompatible RVC-only controls when `version19 == "v3"`
-2. `infer/modules/vc/modules.py`
-   - keep current loader path as default for v1/v2
-   - add version-aware dispatch surface for V3 inference backend calls
-
-Acceptance tests:
-
-1. Manual UI check: selecting V3 forces 48k and disables incompatible controls.
-2. Manual UI check: selecting v1/v2 restores existing controls and behavior.
-3. Smoke: existing `tests/test_smoke.py` still passes unchanged.
+- `web.py`: add V3 routing + “RVC Fine-Tune (Stage 2)” button/checkbox
+- Acceptance: UI correctly exposes separate Stage 2 button and forces 48k
 
 #### Lane B Checklist — V3 Preprocess Integration (YingMusic)
+*(unchanged)*
 
-File-level tasks:
+#### Lane C Checklist — V3 Training Backend (HQ-SVC + RVC discriminator)
+1. `tools/cmd/FullHQSVC.py` — full class + losses + RVC fine-tune methods
+2. `tools/cmd/rvc_discriminator.py` — exact RVC MPD implementation
+3. `tools/cmd/hqsvc_train_adapter.py` — two-stage orchestration + separate Stage 2 entry point
+4. `web.py` — V3 train dispatch supporting both combined and separate Stage 2 button
+**Acceptance tests:**
+- Manual: Stage 1 runs paper losses; separate Stage 2 button runs adversarial + feature matching
+- Smoke: `test_v3_training_stages.py` verifies both stages and the dedicated button
 
-1. `web.py`
-   - add V3 preprocess action/button and status output
-   - wire V3 preprocess into one-click V3 flow before feature extraction/train
-2. `tools/cmd/yingmusic_experiment.py`
-   - expose deterministic output directory arguments for WebUI orchestration
-   - provide clear setup-only and failure status messages consumable by WebUI logs
-3. `training_data/prepare_rvc_dataset.py`
-   - keep `--v3-preset` as canonical V3 preparation path
-   - ensure provenance manifest includes source type and preprocess flags
+#### Lane D Checklist
+*(unchanged except for “RVC Fine-Tuned” badge)*
 
-Acceptance tests:
+#### Lane E Checklist
+- `tests/test_v3_full_pipeline_smoke.py` (includes separate fine-tune button test)
+- Docs updated with RVC fine-tune button instructions
 
-1. Manual command test: V3 preprocess writes isolated vocals and manifest in expected paths.
-2. Manual UI test: V3 preprocess can be started from WebUI and logs progress/errors.
-3. Smoke: V3 preprocess command construction test added and passing.
+### Suggested Sequencing (PR-sized — Updated)
 
-#### Lane C Checklist — V3 Training Backend (HQ-SVC-oriented)
-
-File-level tasks:
-
-1. `tools/cmd/hqsvc_experiment.py`
-   - split setup vs train/fine-tune invocation surfaces
-   - add stable return codes/messages for WebUI supervisor integration
-2. `tools/cmd/` (new)
-   - add `hqsvc_train_adapter.py` to normalize train/fine-tune command contract for WebUI
-3. `web.py`
-   - add V3 train dispatch to adapter command (not RVC trainer)
-   - reuse training supervisor/status files for V3 process lifecycle
-
-Acceptance tests:
-
-1. Manual command test: adapter validates required paths and emits actionable errors.
-2. Manual UI test: V3 train start/status/stop works via existing supervisor UX.
-3. Smoke: V3 train command builder test added and passing.
-
-#### Lane D Checklist — V3 Inference Backend (HQ-SVC-oriented)
-
-File-level tasks:
-
-1. `infer/modules/vc/modules.py`
-   - add V3 inference dispatch branch separated from RVC model loader path
-   - report model metadata/backend in UI status for transparency
-2. `rvc/synthesizer.py`
-   - keep compatibility fallback only for RVC checkpoints
-   - avoid coupling HQ-SVC runtime loading into RVC internals
-3. `web.py`
-   - version-aware inference routing (`v3 -> hqsvc inference adapter`)
-
-Acceptance tests:
-
-1. Manual inference test: V3 checkpoint can be selected and inferred from WebUI.
-2. Manual inference test: v1/v2 checkpoints still infer exactly as before.
-3. Smoke: loader/routing test verifies no v1/v2 regression.
-
-#### Lane E Checklist — Assets, Validation, And Rollout
-
-File-level tasks:
-
-1. `tools/download_models.py`
-   - add V3/YingMusic/HQ-SVC asset readiness helpers and download entries
-2. `web.py`
-   - add preflight checks before V3 preprocess/train/infer actions
-   - provide clear missing-asset remediation text and setup shortcuts
-3. `tests/`
-   - add `test_v3_routing_smoke.py` for routing/preprocess/train command wiring
-   - keep existing `test_smoke.py` green
-4. `README.md` and `docs/en/`
-   - add V3 quickstart, prerequisites, and compatibility matrix
-
-Acceptance tests:
-
-1. Local smoke: `pytest tests/test_smoke.py -v --tb=short` passes.
-2. Local smoke: new V3 smoke suite passes on non-CUDA host with setup-only mode.
-3. Manual clean-environment test: V3 preflight detects missing assets and guides recovery.
-
-### Suggested Sequencing (PR-sized)
-
-1. PR-1: Lane A routing + UX lock (no backend replacement yet).
-2. PR-2: Lane B WebUI-native YingMusic preprocess + manifest plumbing.
-3. PR-3: Lane C V3 train adapter + supervisor wiring.
-4. PR-4: Lane D V3 inference adapter + model selection UX.
-5. PR-5: Lane E assets/preflight/tests/docs and release checklist.
+1. PR-1: Lane A routing + separate “RVC Fine-Tune (Stage 2)” button  
+2. PR-2: Lane B preprocess  
+3. PR-3: Lane C — `FullHQSVC` + RVC discriminator + two-stage adapter  
+4. PR-4: Lane D inference backend  
+5. PR-5: Lane E assets/tests/docs + full smoke suite
 
 ### Per-PR Exit Gate
 

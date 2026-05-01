@@ -44,6 +44,19 @@ try:
 except Exception:  # pragma: no cover
     RMVPE = None
 
+try:
+    from tools.cmd.rvc_discriminator import (
+        MultiPeriodDiscriminator,
+        discriminator_loss,
+        feature_loss,
+        generator_loss,
+    )
+except Exception:  # pragma: no cover
+    MultiPeriodDiscriminator = None
+    discriminator_loss = None
+    feature_loss = None
+    generator_loss = None
+
 
 _STFT_WINDOW_CACHE: dict[tuple[int, str], torch.Tensor] = {}
 _MEL_FILTER_CACHE: dict[tuple[int, int, int, str], torch.Tensor] = {}
@@ -53,6 +66,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Paper-aligned HQ-SVC trainer")
     parser.add_argument("--exp-dir", required=True)
     parser.add_argument("--dataset-dir", default="")
+    parser.add_argument("--stage", default="1", choices=["1", "2"])
+    parser.add_argument("--init-checkpoint", default="")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--encoder-sr", type=int, default=16000)
     parser.add_argument("--mel-bins", type=int, default=128)
@@ -67,8 +82,113 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--author", default="")
     parser.add_argument("--output-checkpoint", default="")
+    parser.add_argument("--discriminator-checkpoint", default="assets/pretrained_v2/f0D48k.pth")
     parser.add_argument("--rmvpe", default="auto", choices=["auto", "on", "off"])
     return parser.parse_args()
+
+
+def _load_checkpoint(path: Path, device: torch.device) -> dict | None:
+    if not path.exists():
+        return None
+    return torch.load(str(path), map_location=device)
+
+
+def _load_model_state(model: nn.Module, payload: dict, prefix: str = "model") -> tuple[list[str], list[str]]:
+    missing: list[str] = []
+    unexpected: list[str] = []
+    state = payload.get(prefix)
+    if state:
+        incompatible = model.load_state_dict(state, strict=False)
+        missing = list(getattr(incompatible, "missing_keys", []))
+        unexpected = list(getattr(incompatible, "unexpected_keys", []))
+    return missing, unexpected
+
+
+def _resolve_init_checkpoint(exp_dir: Path, init_checkpoint: str, stage: str) -> Path | None:
+    if init_checkpoint:
+        return Path(init_checkpoint).resolve()
+    if stage != "2":
+        return None
+    model_dir = exp_dir / "hqsvc_full"
+    for candidate in [
+        model_dir / "G_stage1_latest.pt",
+        model_dir / "G_latest.pt",
+        model_dir / "G_8000.pt",
+    ]:
+        if candidate.exists():
+            return candidate
+    matches = sorted(model_dir.glob("G_*.pt"))
+    return matches[-1] if matches else None
+
+
+def _checkpoint_payload(
+    args: argparse.Namespace,
+    model: nn.Module,
+    global_step: int,
+    speaker_count: int,
+    stage: str,
+    discriminator: nn.Module | None = None,
+) -> dict:
+    payload = {
+        "model": model.state_dict(),
+        "sample_rate": args.sample_rate,
+        "encoder_sr": args.encoder_sr,
+        "mel_bins": args.mel_bins,
+        "hop_feature": args.hop_feature,
+        "hop_infer": args.hop_infer,
+        "global_step": global_step,
+        "speaker_count": speaker_count,
+        "author": args.author,
+        "version": "v3-full-paper-rvc-ft" if stage == "2" else "v3-full-paper-experimental",
+        "training_stage": stage,
+    }
+    if discriminator is not None:
+        payload["discriminator"] = discriminator.state_dict()
+    return payload
+
+
+def _extract_state_dict(payload: object) -> dict | None:
+    if isinstance(payload, dict):
+        if payload and all(isinstance(k, str) for k in payload.keys()):
+            first_val = next(iter(payload.values()))
+            if torch.is_tensor(first_val):
+                return payload
+        for key in ["model", "weight", "discriminator", "state_dict"]:
+            value = payload.get(key)
+            if isinstance(value, dict):
+                inner = _extract_state_dict(value)
+                if inner:
+                    return inner
+    return None
+
+
+def _load_discriminator_checkpoint(discriminator: nn.Module, ckpt_path: Path, device: torch.device) -> None:
+    if not ckpt_path.exists():
+        print("[warn] discriminator checkpoint not found:", ckpt_path)
+        return
+    try:
+        raw_payload = torch.load(str(ckpt_path), map_location=device)
+    except Exception as exc:
+        print("[warn] failed to read discriminator checkpoint %s: %s" % (ckpt_path, exc))
+        return
+    state = _extract_state_dict(raw_payload)
+    if not state:
+        print("[warn] no discriminator-like state dict found in:", ckpt_path)
+        return
+
+    cleaned = {}
+    for key, value in state.items():
+        if not isinstance(key, str):
+            continue
+        new_key = key[7:] if key.startswith("module.") else key
+        cleaned[new_key] = value
+    incompatible = discriminator.load_state_dict(cleaned, strict=False)
+    missing = list(getattr(incompatible, "missing_keys", []))
+    unexpected = list(getattr(incompatible, "unexpected_keys", []))
+    print(
+        "[info] discriminator init loaded from %s (missing=%d unexpected=%d)"
+        % (ckpt_path, len(missing), len(unexpected))
+    )
 
 
 def choose_device(name: str) -> torch.device:
@@ -387,6 +507,14 @@ def main() -> int:
         print("[error] Missing dependencies for paper-mode training.")
         print("[hint] Install: numpy, torch, soundfile, librosa")
         return 2
+    if args.stage == "2" and (
+        MultiPeriodDiscriminator is None
+        or discriminator_loss is None
+        or feature_loss is None
+        or generator_loss is None
+    ):
+        print("[error] RVC discriminator components are unavailable for Stage 2 fine-tuning.")
+        return 2
 
     repo_root = Path(__file__).resolve().parent.parent.parent
     exp_dir = repo_root / "logs" / args.exp_dir
@@ -408,16 +536,43 @@ def main() -> int:
         print("[error] no usable wav clips found in:", dataset_dir)
         return 1
 
+    model_dir = exp_dir / "hqsvc_full"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    init_checkpoint = _resolve_init_checkpoint(exp_dir, args.init_checkpoint, args.stage)
     model = FullPaperHQSVC(len(speaker_table), args.mel_bins).to(device)
+    discriminator = None
+    if args.stage == "2":
+        discriminator = MultiPeriodDiscriminator("v2").to(device)
+        disc_ckpt = Path(args.discriminator_checkpoint)
+        if not disc_ckpt.is_absolute():
+            disc_ckpt = (repo_root / disc_ckpt).resolve()
+        _load_discriminator_checkpoint(discriminator, disc_ckpt, device)
+
+    if init_checkpoint is not None:
+        payload = _load_checkpoint(init_checkpoint, device)
+        if payload is None:
+            print("[error] init checkpoint not found:", init_checkpoint)
+            return 1
+        missing, unexpected = _load_model_state(model, payload, "model")
+        if discriminator is not None and payload.get("discriminator"):
+            disc_missing, disc_unexpected = _load_model_state(discriminator, payload, "discriminator")
+            if disc_missing or disc_unexpected:
+                print("[warn] discriminator checkpoint mismatch missing=%d unexpected=%d" % (len(disc_missing), len(disc_unexpected)))
+        print("[info] loaded checkpoint:", init_checkpoint)
+        if missing or unexpected:
+            print("[warn] model checkpoint mismatch missing=%d unexpected=%d" % (len(missing), len(unexpected)))
+        global_step = int(payload.get("global_step", 0) or 0)
+    else:
+        global_step = 0
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.999))
+    optimizer_d = None
+    if discriminator is not None:
+        optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=args.learning_rate, betas=(0.9, 0.999))
     seg_n = int(args.segment_seconds * args.sample_rate)
 
     phase_times = {"batch": 0.0, "cond": 0.0, "forward": 0.0, "loss": 0.0, "backward": 0.0}
     phase_steps = 0
-    model_dir = exp_dir / "hqsvc_full"
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    global_step = 0
     wall_start = time.time()
     while global_step < args.steps:
         step_start = time.perf_counter()
@@ -448,13 +603,35 @@ def main() -> int:
         l_diff = F.mse_loss(out["noise_pred"], out["noise"])
         l_spk = F.cross_entropy(out["speaker_logits"], speaker_ids)
         l_f0 = F.l1_loss(pred_f0_stats, target_f0_stats)
-        loss = (1.0 * l_ddsp) + (1.0 * l_diff) + (0.1 * l_spk) + (0.2 * l_f0)
+        base_loss = (1.0 * l_ddsp) + (1.0 * l_diff) + (0.1 * l_spk) + (0.2 * l_f0)
+        l_adv = torch.zeros((), device=device)
+        l_fm = torch.zeros((), device=device)
+        l_disc = torch.zeros((), device=device)
         sync_device(device)
         phase_times["loss"] += time.perf_counter() - loss_start
 
         backward_start = time.perf_counter()
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+        if discriminator is not None and optimizer_d is not None:
+            discriminator.train()
+            real_audio = audio.unsqueeze(1)
+            fake_audio = out["audio"].unsqueeze(1)
+            optimizer_d.zero_grad(set_to_none=True)
+            y_d_r, y_d_g, _, _ = discriminator(real_audio, fake_audio.detach())
+            l_disc, _, _ = discriminator_loss(y_d_r, y_d_g)
+            l_disc.backward()
+            nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
+            optimizer_d.step()
+
+            optimizer.zero_grad(set_to_none=True)
+            y_d_r, y_d_g, fmap_r, fmap_g = discriminator(real_audio, fake_audio)
+            l_adv, _ = generator_loss(y_d_g)
+            l_fm = feature_loss(fmap_r, fmap_g)
+            loss = (0.75 * base_loss) + (0.05 * l_adv) + (0.5 * l_fm)
+            loss.backward()
+        else:
+            optimizer.zero_grad(set_to_none=True)
+            loss = base_loss
+            loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         sync_device(device)
@@ -469,15 +646,19 @@ def main() -> int:
                 for key in ["batch", "cond", "forward", "loss", "backward"]
             )
             print(
-                "[step %d/%d] loss=%.4f ddsp=%.4f diff=%.4f spk=%.4f f0=%.4f time=%.1fs"
+                "[step %d/%d][stage %s] loss=%.4f ddsp=%.4f diff=%.4f spk=%.4f f0=%.4f adv=%.4f fm=%.4f disc=%.4f time=%.1fs"
                 % (
                     global_step,
                     args.steps,
+                    args.stage,
                     float(loss.item()),
                     float(l_ddsp.item()),
                     float(l_diff.item()),
                     float(l_spk.item()),
                     float(l_f0.item()),
+                    float(l_adv.item()),
+                    float(l_fm.item()),
+                    float(l_disc.item()),
                     elapsed,
                 )
             )
@@ -488,44 +669,26 @@ def main() -> int:
 
         if global_step % args.save_every == 0 or global_step == args.steps:
             save_path = model_dir / ("G_%d.pt" % global_step)
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "sample_rate": args.sample_rate,
-                    "encoder_sr": args.encoder_sr,
-                    "mel_bins": args.mel_bins,
-                    "hop_feature": args.hop_feature,
-                    "hop_infer": args.hop_infer,
-                    "global_step": global_step,
-                    "speaker_count": len(speaker_table),
-                    "author": args.author,
-                    "version": "v3-full-paper-experimental",
-                },
-                str(save_path),
-            )
+            torch.save(_checkpoint_payload(args, model, global_step, len(speaker_table), args.stage, discriminator), str(save_path))
             print("[save]", save_path)
 
-    final_path = Path(args.output_checkpoint).resolve() if args.output_checkpoint else (model_dir / "G_latest.pt")
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "sample_rate": args.sample_rate,
-            "encoder_sr": args.encoder_sr,
-            "mel_bins": args.mel_bins,
-            "hop_feature": args.hop_feature,
-            "hop_infer": args.hop_infer,
-            "global_step": global_step,
-            "speaker_count": len(speaker_table),
-            "author": args.author,
-            "version": "v3-full-paper-experimental",
-        },
-        str(final_path),
-    )
+    default_name = "G_stage2_latest.pt" if args.stage == "2" else "G_stage1_latest.pt"
+    final_path = Path(args.output_checkpoint).resolve() if args.output_checkpoint else (model_dir / default_name)
+    final_payload = _checkpoint_payload(args, model, global_step, len(speaker_table), args.stage, discriminator)
+    torch.save(final_payload, str(final_path))
+
+    export_name = "%s_v3_stage%s.pth" % (args.exp_dir.replace("/", "_").replace("\\", "_"), args.stage)
+    export_path = repo_root / "assets" / "weights" / export_name
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(final_payload, str(export_path))
 
     meta = {
         "experiment": args.exp_dir,
         "dataset_dir": str(dataset_dir),
         "checkpoint": str(final_path),
+        "exported_weight": str(export_path),
+        "init_checkpoint": str(init_checkpoint) if init_checkpoint is not None else "",
+        "discriminator_checkpoint": args.discriminator_checkpoint,
         "sample_rate": args.sample_rate,
         "encoder_sr": args.encoder_sr,
         "mel_bins": args.mel_bins,
@@ -534,13 +697,16 @@ def main() -> int:
         "batch_size": args.batch_size,
         "steps": args.steps,
         "learning_rate": args.learning_rate,
-        "losses": ["L_ddsp", "L_diff", "L_spk", "L_f0"],
+        "stage": args.stage,
+        "losses": ["L_ddsp", "L_diff", "L_spk", "L_f0"] + (["L_adv", "L_fm", "L_disc"] if args.stage == "2" else []),
         "speaker_count": len(speaker_table),
         "paper_alignment": "full_paper_mode_scaffold",
+        "rvc_fine_tuned": args.stage == "2",
     }
     (exp_dir / "hqsvc_full_training.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print("[done] paper-mode training complete")
     print("[done] checkpoint:", final_path)
+    print("[done] exported weight:", export_path)
     return 0
 
 

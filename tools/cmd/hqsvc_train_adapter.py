@@ -24,6 +24,11 @@ Backends:
     full_paper_mode — use in-repo paper-aligned HQ-SVC scaffold
     local_experimental — use in-repo experimental trainer (CPU/GPU)
     auto — prefer external when available, otherwise full_paper_mode
+
+Stages:
+    1 — paper-mode training only
+    2 — RVC discriminator fine-tuning only (full_paper_mode only)
+    both — run stage 1 followed by stage 2 (full_paper_mode only)
 """
 
 from __future__ import annotations
@@ -126,6 +131,31 @@ def _check_hqsvc_env(repo_dir: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _stage_checkpoint_paths(exp_dir: Path) -> tuple[Path, Path]:
+    model_dir = exp_dir / "hqsvc_full"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return model_dir / "G_stage1_latest.pt", model_dir / "G_stage2_latest.pt"
+
+
+def _resolve_stage2_init(exp_dir: Path, init_checkpoint: str) -> Path | None:
+    if init_checkpoint:
+        path = Path(init_checkpoint).resolve()
+        return path if path.exists() else None
+    stage1_path, _ = _stage_checkpoint_paths(exp_dir)
+    if stage1_path.exists():
+        return stage1_path
+    fallback = exp_dir / "hqsvc_full" / "G_latest.pt"
+    if fallback.exists():
+        return fallback
+    matches = sorted((exp_dir / "hqsvc_full").glob("G_*.pt"))
+    return matches[-1] if matches else None
+
+
+def _run_backend(cmd: list[str], cwd: Path, log_handle, status_file: Path, stage_label: str) -> int:
+    _write_status(status_file, "running", "V3 %s started" % stage_label, running=True)
+    return subprocess.run(cmd, cwd=str(cwd), stdout=log_handle, stderr=subprocess.STDOUT).returncode
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="V3 HQ-SVC training adapter for WebUI",
@@ -208,6 +238,23 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "cpu", "cuda", "mps"],
         help="Execution device for local_experimental backend.",
     )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.0,
+        help="Override learning rate for local_experimental/full_paper_mode backends. 0 = use script default.",
+    )
+    parser.add_argument(
+        "--stage",
+        default="1",
+        choices=["1", "2", "both"],
+        help="Training stage to run for V3 full-paper backend.",
+    )
+    parser.add_argument(
+        "--init-checkpoint",
+        default="",
+        help="Optional checkpoint path used to initialize Stage 2 fine-tuning.",
+    )
     return parser.parse_args()
 
 
@@ -244,6 +291,7 @@ def main() -> int:
     _print("Epochs: %s / save every %s" % (args.total_epoch, args.save_epoch))
     _print("Batch size: %s" % args.batch_size)
     _print("Backend: %s" % args.backend)
+    _print("Stage: %s" % args.stage)
 
     # --- Prerequisite validation ---
     errors = _validate_prerequisites(args, exp_dir)
@@ -282,6 +330,13 @@ def main() -> int:
         _log.close()
         return 0  # Not a hard error — informational setup-only exit
 
+    if args.stage in {"2", "both"} and selected_backend != "full_paper_mode":
+        msg = "RVC discriminator Stage 2 is only supported with backend 'full_paper_mode'."
+        _print(msg)
+        _write_status(status_file, "failed", msg)
+        _log.close()
+        return 2
+
     if args.setup_only:
         _print("V3 environment validated. Ready to train with backend: %s" % selected_backend)
         _write_status(
@@ -293,6 +348,7 @@ def main() -> int:
         return 0
 
     # --- Invoke selected V3 training backend ---
+    stage1_path, stage2_path = _stage_checkpoint_paths(exp_dir)
     if selected_backend == "external":
         venv_python = repo_dir / "venv" / "bin" / "python"
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_native_train.py"
@@ -322,6 +378,7 @@ def main() -> int:
             cmd += ["--author", args.author]
         if args.gpus:
             cmd += ["--gpus", args.gpus]
+        run_plan = [("external training", cmd, repo_dir)]
     elif selected_backend == "local_experimental":
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_local_train.py"
         cmd = [
@@ -342,44 +399,102 @@ def main() -> int:
         ]
         if args.dataset_dir:
             cmd += ["--dataset-dir", args.dataset_dir]
+        if args.learning_rate > 0:
+            cmd += ["--learning-rate", str(args.learning_rate)]
+        run_plan = [("local experimental training", cmd, NOW_DIR)]
     else:
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_full_train.py"
-        cmd = [
+        stage1_steps = max(50, int(args.steps))
+        stage2_steps = max(800, min(6000, max(1, int(args.steps)) // 3))
+        stage2_lr = args.learning_rate if args.learning_rate > 0 else 5e-5
+        stage2_lr = min(stage2_lr, 5e-5)
+        stage1_cmd = [
             str(sys.executable),
             str(train_launcher),
             "--exp-dir",
             args.exp_dir,
+            "--stage",
+            "1",
             "--sample-rate",
             "48000",
             "--batch-size",
             str(max(1, int(args.batch_size))),
             "--steps",
-            str(max(50, int(args.steps))),
+            str(stage1_steps),
             "--author",
             str(args.author or ""),
             "--device",
             args.device,
+            "--output-checkpoint",
+            str(stage1_path),
         ]
         if args.dataset_dir:
-            cmd += ["--dataset-dir", args.dataset_dir]
+            stage1_cmd += ["--dataset-dir", args.dataset_dir]
+        if args.learning_rate > 0:
+            stage1_cmd += ["--learning-rate", str(args.learning_rate)]
 
-    _print("Launching V3 training (%s): %s" % (selected_backend, " ".join(cmd)))
-    _write_status(status_file, "running", "V3 HQ-SVC training started", running=True)
+        stage2_init = _resolve_stage2_init(exp_dir, args.init_checkpoint)
+        stage2_cmd = [
+            str(sys.executable),
+            str(train_launcher),
+            "--exp-dir",
+            args.exp_dir,
+            "--stage",
+            "2",
+            "--sample-rate",
+            "48000",
+            "--batch-size",
+            str(max(1, int(args.batch_size))),
+            "--steps",
+            str(stage2_steps),
+            "--author",
+            str(args.author or ""),
+            "--device",
+            args.device,
+            "--output-checkpoint",
+            str(stage2_path),
+        ]
+        if args.dataset_dir:
+            stage2_cmd += ["--dataset-dir", args.dataset_dir]
+        stage2_cmd += ["--learning-rate", str(stage2_lr)]
+        if stage2_init is not None:
+            stage2_cmd += ["--init-checkpoint", str(stage2_init)]
 
-    result = subprocess.run(cmd, cwd=str(repo_dir), stdout=_log, stderr=subprocess.STDOUT)
+        if args.stage == "1":
+            run_plan = [("paper Stage 1", stage1_cmd, NOW_DIR)]
+        elif args.stage == "2":
+            if stage2_init is None:
+                msg = "Stage 2 requested, but no Stage 1 checkpoint was found. Run Stage 1 first or provide --init-checkpoint."
+                _print(msg)
+                _write_status(status_file, "failed", msg)
+                _log.close()
+                return 2
+            run_plan = [("paper Stage 2", stage2_cmd, NOW_DIR)]
+        else:
+            run_plan = [("paper Stage 1", stage1_cmd, NOW_DIR), ("paper Stage 2", stage2_cmd, NOW_DIR)]
+
+    for stage_label, cmd, cwd in run_plan:
+        _print("Launching V3 %s (%s): %s" % (stage_label, selected_backend, " ".join(cmd)))
+        rc = _run_backend(cmd, cwd, _log, status_file, stage_label)
+        if rc != 0:
+            _log.close()
+            _write_status(
+                status_file,
+                "failed",
+                "V3 %s exited with code %d. Check %s for details." % (stage_label, rc, log_file),
+                last_exit_code=rc,
+            )
+            return 2
+
     _log.close()
-
-    if result.returncode == 0:
-        _write_status(status_file, "complete", "V3 training completed successfully")
-        return 0
-
-    _write_status(
-        status_file,
-        "failed",
-        "V3 training exited with code %d. Check %s for details." % (result.returncode, log_file),
-        last_exit_code=result.returncode,
-    )
-    return 2
+    if args.stage == "both":
+        msg = "V3 Stage 1 + Stage 2 completed successfully"
+    elif args.stage == "2":
+        msg = "V3 Stage 2 completed successfully"
+    else:
+        msg = "V3 Stage 1 completed successfully"
+    _write_status(status_file, "complete", msg)
+    return 0
 
 
 if __name__ == "__main__":
