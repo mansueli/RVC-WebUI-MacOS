@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+from collections import deque
 from typing import Tuple
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ from rvc.layers.utils import (
 )
 
 global_step = 0
+_SMART_MEL_HISTORY = deque()
+_LAST_SMART_SAVE_EPOCH = -10**9
 
 
 def _stop_paths(hps: utils.HParams):
@@ -532,6 +535,8 @@ def train_and_evaluate(
 
     # Run steps
     epoch_recorder = EpochRecorder()
+    epoch_mel_sum = 0.0
+    epoch_mel_count = 0
     for batch_idx, info in data_iterator:
         # Data
         ## Unpack
@@ -621,6 +626,8 @@ def train_and_evaluate(
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
                 loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+                epoch_mel_sum += float(loss_mel.item())
+                epoch_mel_count += 1
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -690,7 +697,65 @@ def train_and_evaluate(
         global_step += 1
     # /Run steps
 
-    if epoch % hps.save_every_epoch == 0 and rank == 0:
+    did_smart_save = False
+    if rank == 0 and epoch_mel_count > 0:
+        global _SMART_MEL_HISTORY, _LAST_SMART_SAVE_EPOCH
+        smart_enabled = str(getattr(hps, "smart_save", "on")).lower() == "on"
+        smart_window = max(1, int(getattr(hps, "smart_save_window", 10)))
+        smart_min_improve = float(getattr(hps, "smart_save_min_improve", 2.0))
+        smart_max_mel = float(getattr(hps, "smart_save_max_mel", 16.0))
+        smart_cooldown = max(0, int(getattr(hps, "smart_save_cooldown", 5)))
+        smart_min_epoch = max(1, int(getattr(hps, "smart_save_min_epoch", 10)))
+
+        if _SMART_MEL_HISTORY.maxlen != smart_window:
+            _SMART_MEL_HISTORY = deque(list(_SMART_MEL_HISTORY), maxlen=smart_window)
+
+        epoch_mel_avg = epoch_mel_sum / max(1, epoch_mel_count)
+        if (
+            smart_enabled
+            and epoch >= smart_min_epoch
+            and len(_SMART_MEL_HISTORY) >= smart_window
+            and (epoch - _LAST_SMART_SAVE_EPOCH) >= smart_cooldown
+        ):
+            prev_avg = float(sum(_SMART_MEL_HISTORY) / len(_SMART_MEL_HISTORY))
+            improve = prev_avg - epoch_mel_avg
+            mel_cap_ok = smart_max_mel <= 0 or epoch_mel_avg <= smart_max_mel
+            if improve >= smart_min_improve and mel_cap_ok:
+                _save_epoch_boundary_checkpoint(hps, net_g, net_d, optim_g, optim_d, epoch)
+                did_smart_save = True
+                _LAST_SMART_SAVE_EPOCH = epoch
+                logger.info(
+                    "Smart save triggered at epoch=%s mel_avg=%.4f prev_avg_%s=%.4f improve=%.4f",
+                    epoch,
+                    epoch_mel_avg,
+                    len(_SMART_MEL_HISTORY),
+                    prev_avg,
+                    improve,
+                )
+                if hps.save_every_weights == "1":
+                    if hasattr(net_g, "module"):
+                        ckpt = net_g.module.state_dict()
+                    else:
+                        ckpt = net_g.state_dict()
+                    logger.info(
+                        "saving smart ckpt %s_e%s:%s"
+                        % (
+                            hps.name,
+                            epoch,
+                            save_small_model(
+                                ckpt,
+                                hps.sample_rate,
+                                hps.if_f0,
+                                hps.name + "_smart_e%s_s%s" % (epoch, global_step),
+                                epoch,
+                                hps.version,
+                                hps,
+                            ),
+                        )
+                    )
+        _SMART_MEL_HISTORY.append(epoch_mel_avg)
+
+    if epoch % hps.save_every_epoch == 0 and rank == 0 and not did_smart_save:
         _save_epoch_boundary_checkpoint(hps, net_g, net_d, optim_g, optim_d, epoch)
         if rank == 0 and hps.save_every_weights == "1":
             if hasattr(net_g, "module"):

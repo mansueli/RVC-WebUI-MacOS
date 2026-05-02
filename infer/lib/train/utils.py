@@ -280,6 +280,43 @@ def get_hparams(init=True):
         help="if caching the dataset in GPU memory, 1 or 0",
     )
     parser.add_argument("-a", "--author", type=str, default="", help="Model author")
+    parser.add_argument(
+        "--smart-save",
+        type=str,
+        default="on",
+        choices=["on", "off"],
+        help="Enable adaptive epoch checkpointing based on mel-loss improvements.",
+    )
+    parser.add_argument(
+        "--smart-save-window",
+        type=int,
+        default=10,
+        help="Rolling epoch window used as mel-loss baseline.",
+    )
+    parser.add_argument(
+        "--smart-save-min-improve",
+        type=float,
+        default=2.0,
+        help="Minimum baseline-minus-current mel-loss improvement to trigger smart save.",
+    )
+    parser.add_argument(
+        "--smart-save-max-mel",
+        type=float,
+        default=16.0,
+        help="Only smart-save when epoch mel loss is <= this value (<=0 disables cap).",
+    )
+    parser.add_argument(
+        "--smart-save-cooldown",
+        type=int,
+        default=5,
+        help="Minimum epochs between smart-save checkpoints.",
+    )
+    parser.add_argument(
+        "--smart-save-min-epoch",
+        type=int,
+        default=10,
+        help="Earliest epoch eligible for smart-save checkpoints.",
+    )
 
     args = parser.parse_args()
     name = args.experiment_dir
@@ -306,6 +343,12 @@ def get_hparams(init=True):
     hparams.if_cache_data_in_gpu = args.if_cache_data_in_gpu
     hparams.data.training_files = "%s/filelist.txt" % experiment_dir
     hparams.author = args.author
+    hparams.smart_save = args.smart_save
+    hparams.smart_save_window = args.smart_save_window
+    hparams.smart_save_min_improve = args.smart_save_min_improve
+    hparams.smart_save_max_mel = args.smart_save_max_mel
+    hparams.smart_save_cooldown = args.smart_save_cooldown
+    hparams.smart_save_min_epoch = args.smart_save_min_epoch
     return hparams
 
 

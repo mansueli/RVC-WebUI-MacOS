@@ -17,6 +17,7 @@ import argparse
 import json
 import random
 import time
+from collections import deque
 from pathlib import Path
 
 try:
@@ -63,6 +64,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--segment-seconds", type=float, default=2.2)
     p.add_argument("--learning-rate", type=float, default=1.0e-4)
     p.add_argument("--save-every", type=int, default=300)
+    p.add_argument("--smart-save", default="on", choices=["on", "off"])
+    p.add_argument("--smart-save-window", type=int, default=10)
+    p.add_argument("--smart-save-min-improve", type=float, default=2.0)
+    p.add_argument("--smart-save-max-mel", type=float, default=16.0)
+    p.add_argument("--smart-save-cooldown", type=int, default=200)
+    p.add_argument("--smart-save-min-step", type=int, default=200)
     p.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--author", default="")
     p.add_argument("--output-checkpoint", default="")
@@ -317,6 +324,9 @@ def main() -> int:
         "backward": 0.0,
     }
     phase_steps = 0
+    mel_history = deque(maxlen=max(1, int(args.smart_save_window)))
+    smart_save_enabled = str(args.smart_save).lower() == "on"
+    last_smart_save_step = -10**9
     while global_step < args.steps:
         phase_start = time.perf_counter()
         batch = np.stack([random_crop(random.choice(wavs), seg_n) for _ in range(args.batch_size)], axis=0)
@@ -383,6 +393,41 @@ def main() -> int:
 
         global_step += 1
         phase_steps += 1
+        loss_mel = float(l_ddsp.item())
+
+        saved_this_step = False
+        if (
+            smart_save_enabled
+            and global_step >= int(args.smart_save_min_step)
+            and len(mel_history) >= max(1, int(args.smart_save_window))
+            and (global_step - last_smart_save_step) >= int(args.smart_save_cooldown)
+        ):
+            avg_prev = float(sum(mel_history) / len(mel_history))
+            improve = avg_prev - loss_mel
+            max_mel_ok = float(args.smart_save_max_mel) <= 0 or loss_mel <= float(args.smart_save_max_mel)
+            if improve >= float(args.smart_save_min_improve) and max_mel_ok:
+                ckpt = {
+                    "model": model.state_dict(),
+                    "sample_rate": args.sample_rate,
+                    "encoder_sr": args.encoder_sr,
+                    "mel_bins": args.mel_bins,
+                    "hop_feature": args.hop_feature,
+                    "hop_infer": args.hop_infer,
+                    "global_step": global_step,
+                    "author": args.author,
+                    "version": "v3-local-experimental",
+                }
+                smart_path = model_dir / ("G_smart_%d.pt" % global_step)
+                torch.save(ckpt, str(smart_path))
+                print(
+                    "[smart-save] %s loss_mel=%.4f avg_prev_%d=%.4f improve=%.4f"
+                    % (smart_path, loss_mel, len(mel_history), avg_prev, improve)
+                )
+                last_smart_save_step = global_step
+                saved_this_step = True
+
+        mel_history.append(loss_mel)
+
         if global_step % 20 == 0:
             elapsed = time.time() - t0
             avg_phase = ", ".join(
@@ -407,7 +452,7 @@ def main() -> int:
                 phase_times[key] = 0.0
             phase_steps = 0
 
-        if global_step % args.save_every == 0 or global_step == args.steps:
+        if (global_step % args.save_every == 0 or global_step == args.steps) and not saved_this_step:
             save_start = time.perf_counter()
             ckpt = {
                 "model": model.state_dict(),
@@ -455,6 +500,14 @@ def main() -> int:
         "batch_size": args.batch_size,
         "steps": args.steps,
         "learning_rate": args.learning_rate,
+        "smart_save": {
+            "enabled": smart_save_enabled,
+            "window": int(args.smart_save_window),
+            "min_improve": float(args.smart_save_min_improve),
+            "max_mel": float(args.smart_save_max_mel),
+            "cooldown": int(args.smart_save_cooldown),
+            "min_step": int(args.smart_save_min_step),
+        },
         "losses": ["L_ddsp", "L_diff", "L_spk", "L_f0"],
         "paper_alignment": "experimental_approximation",
     }

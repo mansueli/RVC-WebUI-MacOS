@@ -853,11 +853,27 @@ def change_version19(sr2, if_f0_3, version19):
     else:
         pretrained_g, pretrained_d = get_pretrained_models(path_str, f0_str, sr2)
     v3_row_visible = {"visible": version19 == "v3", "__type__": "update"}
+    if version19 == "v3":
+        trainset_dir_update = {
+            "visible": False,
+            "value": "",
+            "placeholder": i18n(
+                "For V3 this is auto-selected from logs/<exp>/v3_isolated after V3 preprocess"
+            ),
+            "__type__": "update",
+        }
+    else:
+        trainset_dir_update = {
+            "visible": True,
+            "placeholder": "",
+            "__type__": "update",
+        }
     return (
         pretrained_g,
         pretrained_d,
         to_return_sr2,
         v3_row_visible,
+        trainset_dir_update,
     )
 
 
@@ -1101,6 +1117,12 @@ def click_train(
     gpus16,
     if_cache_gpu17,
     if_save_every_weights18,
+    smart_save_enable20,
+    smart_save_window21,
+    smart_save_min_improve22,
+    smart_save_max_mel23,
+    smart_save_cooldown24,
+    smart_save_min_step25,
     v3_train_backend19,
     v3_enable_rvc_stage2,
     version19,
@@ -1122,6 +1144,12 @@ def click_train(
             author,
             v3_train_backend19,
             v3_enable_rvc_stage2,
+            smart_save_enable20,
+            smart_save_window21,
+            smart_save_min_improve22,
+            smart_save_max_mel23,
+            smart_save_cooldown24,
+            smart_save_min_step25,
             v3_train_preset=v3_train_preset,
             run_async=run_async,
         )
@@ -1235,6 +1263,8 @@ def click_train(
             f.write("\n")
     cmd = (
         '"%s" infer/modules/train/train.py -e "%s" -sr %s -f0 %s -bs %s -te %s -se %s %s %s -l %s -c %s -sw %s -v %s -a "%s"'
+        ' --smart-save %s --smart-save-window %s --smart-save-min-improve %s --smart-save-max-mel %s'
+        ' --smart-save-cooldown %s --smart-save-min-epoch %s'
         % (
             config.python_cmd,
             exp_dir1,
@@ -1250,6 +1280,12 @@ def click_train(
             1 if if_save_every_weights18 == i18n("Yes") else 0,
             version19,
             author,
+            "on" if smart_save_enable20 == i18n("Yes") else "off",
+            int(smart_save_window21),
+            float(smart_save_min_improve22),
+            float(smart_save_max_mel23),
+            int(smart_save_cooldown24),
+            int(smart_save_min_step25),
         )
     )
     if gpus16:
@@ -1435,6 +1471,12 @@ def train1key(
     gpus16,
     if_cache_gpu17,
     if_save_every_weights18,
+    smart_save_enable20,
+    smart_save_window21,
+    smart_save_min_improve22,
+    smart_save_max_mel23,
+    smart_save_cooldown24,
+    smart_save_min_step25,
     v3_train_backend19,
     v3_enable_rvc_stage2,
     version19,
@@ -1511,6 +1553,12 @@ def train1key(
         gpus16,
         if_cache_gpu17,
         if_save_every_weights18,
+        smart_save_enable20,
+        smart_save_window21,
+        smart_save_min_improve22,
+        smart_save_max_mel23,
+        smart_save_cooldown24,
+        smart_save_min_step25,
         v3_train_backend19,
         v3_enable_rvc_stage2,
         version19,
@@ -1551,6 +1599,68 @@ def change_info_(ckpt_path):
 # V3 (HQ-SVC-oriented) backend functions
 # ---------------------------------------------------------------------------
 
+def _v3_audio_file_count(folder_path: str) -> int:
+    try:
+        root = pathlib.Path(folder_path)
+        if not root.exists() or not root.is_dir():
+            return 0
+        exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
+        return sum(1 for p in root.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    except Exception:
+        return 0
+
+
+def _tail_text_block(text: str, max_lines: int = 60) -> str:
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[-max_lines:])
+
+
+def _render_v3_preprocess_status(
+    log_text: str,
+    source_dir: str,
+    output_dir: str,
+    backend: str,
+    setup_only: bool,
+    running: bool,
+):
+    src_count = _v3_audio_file_count(source_dir) if source_dir else 0
+    out_count = _v3_audio_file_count(output_dir)
+    done_count = log_text.count("[done]") if log_text else 0
+    warn_count = log_text.count("[warn]") if log_text else 0
+    err_count = log_text.count("[error]") if log_text else 0
+
+    if setup_only:
+        progress_line = "Mode: setup-only (environment check)"
+        percent_line = "Progress: n/a"
+    elif src_count > 0:
+        progress_line = "Progress: %s/%s files isolated (by output count: %s)" % (
+            min(done_count, src_count),
+            src_count,
+            out_count,
+        )
+        progress_ratio = max(0.0, min(1.0, float(out_count) / float(src_count)))
+        percent_line = "Progress percent: %.1f%%" % (100.0 * progress_ratio)
+    else:
+        progress_line = "Progress: source scan pending"
+        percent_line = "Progress percent: n/a"
+
+    state = "RUNNING" if running else "FINISHED"
+    summary = (
+        "V3 Preprocess Status: %s\n" % state
+        + "Backend: %s\n" % (backend or "paper_auto")
+        + "Source dir: %s\n" % (source_dir or "(not provided)")
+        + "Output dir: %s\n" % output_dir
+        + progress_line
+        + "\n"
+        + percent_line
+        + "\nWarnings: %s | Errors: %s\n" % (warn_count, err_count)
+    )
+
+    tail = _tail_text_block(log_text or "", max_lines=60)
+    return summary + "\n--- Latest Log ---\n" + tail
+
 def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
     """Run YingMusic vocal isolation for V3 dataset preparation.
 
@@ -1567,8 +1677,11 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
     preprocess_backend = (v3_preprocess_backend or "full_paper_mode").strip()
     has_cuda = shutil.which("nvidia-smi") is not None
 
+    src = ""
+    setup_only = True
     if v3_source_dir and v3_source_dir.strip():
         src = v3_source_dir.strip()
+        setup_only = False
         if preprocess_backend == "external_yingmusic" and has_cuda:
             cmd = (
                 '"%s" tools/cmd/yingmusic_experiment.py'
@@ -1609,7 +1722,15 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
     while True:
         log_f.flush()
         with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
-            yield rf.read()
+            log_text = rf.read()
+        yield _render_v3_preprocess_status(
+            log_text,
+            src,
+            str(isolated_dir),
+            preprocess_backend,
+            setup_only,
+            running=True,
+        )
         sleep(1)
         if done[0]:
             break
@@ -1618,14 +1739,25 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
     with open(log_path, "r", encoding="utf-8", errors="ignore") as rf:
         log = rf.read()
     logger.info(log)
+    status_rendered = _render_v3_preprocess_status(
+        log,
+        src,
+        str(isolated_dir),
+        preprocess_backend,
+        setup_only,
+        running=False,
+    )
     rc = p.poll()
     if rc == 0:
-        yield log + "\n[V3 Preprocess] Environment check passed."
+        yield status_rendered + "\n\n[V3 Preprocess] Completed successfully."
     elif rc == 2:
-        yield log + "\n[V3 Preprocess] CUDA not available on this host. " \
-            "Run on a CUDA machine or use the isolated vocals directory manually."
+        yield (
+            status_rendered
+            + "\n\n[V3 Preprocess] CUDA not available on this host. "
+            + "Run on a CUDA machine or use the isolated vocals directory manually."
+        )
     else:
-        yield log + "\n[V3 Preprocess] Finished (exit code %s)." % rc
+        yield status_rendered + "\n\n[V3 Preprocess] Finished (exit code %s)." % rc
 
 
 _V3_PRESETS = {
@@ -1665,6 +1797,12 @@ def _launch_v3_training(
     gpus16,
     author,
     v3_train_backend,
+    smart_save_enable20,
+    smart_save_window21,
+    smart_save_min_improve22,
+    smart_save_max_mel23,
+    smart_save_cooldown24,
+    smart_save_min_step25,
     v3_train_preset="base_model",
     v3_stage="1",
     run_async=True,
@@ -1710,6 +1848,12 @@ def _launch_v3_training(
         ' --save-every-weights %s'
         ' --steps %s'
         ' --learning-rate %s'
+        ' --smart-save %s'
+        ' --smart-save-window %s'
+        ' --smart-save-min-improve %s'
+        ' --smart-save-max-mel %s'
+        ' --smart-save-cooldown %s'
+        ' --smart-save-min-step %s'
         ' --stage %s'
         ' --backend "%s"'
         ' --author "%s"'
@@ -1725,6 +1869,12 @@ def _launch_v3_training(
             save_weights_flag,
             v3_steps,
             v3_lr,
+            "on" if smart_save_enable20 == i18n("Yes") else "off",
+            int(smart_save_window21),
+            float(smart_save_min_improve22),
+            float(smart_save_max_mel23),
+            int(smart_save_cooldown24),
+            int(smart_save_min_step25),
             v3_stage,
             v3_train_backend or "full_paper_mode",
             author,
@@ -1797,6 +1947,12 @@ def click_train_v3(
     author,
     v3_train_backend,
     v3_enable_rvc_stage2,
+    smart_save_enable20,
+    smart_save_window21,
+    smart_save_min_improve22,
+    smart_save_max_mel23,
+    smart_save_cooldown24,
+    smart_save_min_step25,
     v3_train_preset="base_model",
     run_async=True,
 ):
@@ -1812,6 +1968,12 @@ def click_train_v3(
         gpus16,
         author,
         v3_train_backend,
+        smart_save_enable20,
+        smart_save_window21,
+        smart_save_min_improve22,
+        smart_save_max_mel23,
+        smart_save_cooldown24,
+        smart_save_min_step25,
         v3_train_preset=v3_train_preset,
         v3_stage=stage,
         run_async=run_async,
@@ -1829,6 +1991,12 @@ def click_train_v3_stage2(
     gpus16,
     author,
     v3_train_backend,
+    smart_save_enable20,
+    smart_save_window21,
+    smart_save_min_improve22,
+    smart_save_max_mel23,
+    smart_save_cooldown24,
+    smart_save_min_step25,
     v3_train_preset="base_model",
 ):
     return _launch_v3_training(
@@ -1842,6 +2010,12 @@ def click_train_v3_stage2(
         gpus16,
         author,
         v3_train_backend,
+        smart_save_enable20,
+        smart_save_window21,
+        smart_save_min_improve22,
+        smart_save_max_mel23,
+        smart_save_cooldown24,
+        smart_save_min_step25,
         v3_train_preset=v3_train_preset,
         v3_stage="2",
         run_async=True,
@@ -2355,7 +2529,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     info_v3_preprocess = gr.Textbox(
                         label=i18n("V3 Preprocess status"),
                         value="",
-                        lines=6,
+                        lines=14,
                     )
                     but_v3_preprocess.click(
                         v3_preprocess_dataset,
@@ -2372,6 +2546,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                 with gr.Column():
                     trainset_dir4 = gr.Textbox(
                         label=i18n("Enter the path of the training folder"),
+                        placeholder=i18n("Required for v1/v2. V3 uses auto-selected isolated vocals."),
                     )
                     preprocess_mode8 = gr.Radio(
                         label=i18n("Step 1 mode"),
@@ -2506,6 +2681,52 @@ with gr.Blocks(title="RVC WebUI") as app:
                         value=i18n("Yes"),
                         interactive=True,
                     )
+                    smart_save_enable20 = gr.Radio(
+                        label=i18n("Smart save checkpoints on strong mel-loss improvements"),
+                        choices=[i18n("Yes"), i18n("No")],
+                        value=i18n("Yes"),
+                        interactive=True,
+                    )
+                    smart_save_window21 = gr.Slider(
+                        minimum=3,
+                        maximum=30,
+                        step=1,
+                        label=i18n("Smart save baseline window (epochs/steps)"),
+                        value=10,
+                        interactive=True,
+                    )
+                    smart_save_min_improve22 = gr.Slider(
+                        minimum=0.1,
+                        maximum=10.0,
+                        step=0.1,
+                        label=i18n("Smart save minimum mel-loss improvement"),
+                        value=2.0,
+                        interactive=True,
+                    )
+                    smart_save_max_mel23 = gr.Slider(
+                        minimum=0.0,
+                        maximum=100.0,
+                        step=0.5,
+                        label=i18n("Smart save mel-loss cap (0 disables cap)"),
+                        value=16.0,
+                        interactive=True,
+                    )
+                    smart_save_cooldown24 = gr.Slider(
+                        minimum=0,
+                        maximum=200,
+                        step=1,
+                        label=i18n("Smart save cooldown (epochs/steps)"),
+                        value=5,
+                        interactive=True,
+                    )
+                    smart_save_min_step25 = gr.Slider(
+                        minimum=1,
+                        maximum=500,
+                        step=1,
+                        label=i18n("Smart save start after (epoch/step)"),
+                        value=10,
+                        interactive=True,
+                    )
                     v3_train_preset_radio.change(
                         v3_apply_preset,
                         [v3_train_preset_radio],
@@ -2537,7 +2758,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     version19.change(
                         change_version19,
                         [sr2, if_f0_3, version19],
-                        [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row],
+                        [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row, trainset_dir4],
                     )
                     if_f0_3.change(
                         change_f0,
@@ -2571,6 +2792,12 @@ with gr.Blocks(title="RVC WebUI") as app:
                         gpus16,
                         if_cache_gpu17,
                         if_save_every_weights18,
+                        smart_save_enable20,
+                        smart_save_window21,
+                        smart_save_min_improve22,
+                        smart_save_max_mel23,
+                        smart_save_cooldown24,
+                        smart_save_min_step25,
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
                         version19,
@@ -2606,6 +2833,12 @@ with gr.Blocks(title="RVC WebUI") as app:
                         gpus16,
                         author,
                         v3_train_backend19,
+                        smart_save_enable20,
+                        smart_save_window21,
+                        smart_save_min_improve22,
+                        smart_save_max_mel23,
+                        smart_save_cooldown24,
+                        smart_save_min_step25,
                         v3_train_preset_radio,
                     ],
                     info3,
@@ -2633,6 +2866,12 @@ with gr.Blocks(title="RVC WebUI") as app:
                         gpus16,
                         if_cache_gpu17,
                         if_save_every_weights18,
+                        smart_save_enable20,
+                        smart_save_window21,
+                        smart_save_min_improve22,
+                        smart_save_max_mel23,
+                        smart_save_cooldown24,
+                        smart_save_min_step25,
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
                         version19,

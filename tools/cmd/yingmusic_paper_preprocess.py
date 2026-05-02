@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 try:
@@ -124,6 +125,26 @@ def _load_hdemucs_bundle():
     return None
 
 
+def _load_waveform_for_separator(path: Path):
+    """Load audio without requiring torchcodec-backed torchaudio loaders.
+
+    On some torchaudio builds, torchaudio.load hard-depends on torchcodec.
+    Prefer soundfile when available, then fall back to torchaudio.
+    """
+    if torch is None:
+        raise RuntimeError("torch is required for separator audio loading")
+
+    if sf is not None and np is not None:
+        wav, sr = sf.read(str(path), always_2d=True)
+        wav = np.asarray(wav, dtype=np.float32)
+        waveform = torch.from_numpy(wav.T.copy())
+        return waveform, int(sr)
+
+    if torchaudio is None:
+        raise RuntimeError("neither soundfile nor torchaudio audio loading is available")
+    return torchaudio.load(str(path))
+
+
 def run_torchaudio_separator(
     source_dir: Path,
     output_dir: Path,
@@ -141,6 +162,14 @@ def run_torchaudio_separator(
         print("[warn] No torchaudio HDemucs bundle is available in this environment.")
         return 2
 
+    # PyTorch/torchaudio version combos on macOS can emit noisy internal
+    # resize warnings from STFT/ISTFT scratch buffers; these are non-fatal.
+    warnings.filterwarnings(
+        "ignore",
+        message=r"An output with one or more elements was resized since it had shape \[\]",
+        category=UserWarning,
+    )
+
     files = list_audio_files(source_dir)
     if not files:
         print("[error] no audio files found in source-dir:", source_dir)
@@ -153,7 +182,11 @@ def run_torchaudio_separator(
     other_idx = source_to_idx.get("other", None)
 
     for src in files:
-        waveform, sr = torchaudio.load(str(src))
+        try:
+            waveform, sr = _load_waveform_for_separator(src)
+        except Exception as exc:
+            print("[warn] failed to load %s for neural separator: %s" % (src, exc))
+            return 2
         if waveform.shape[0] == 1:
             waveform = waveform.repeat(2, 1)
         if sr != bundle.sample_rate:

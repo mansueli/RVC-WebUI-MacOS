@@ -255,6 +255,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional checkpoint path used to initialize Stage 2 fine-tuning.",
     )
+    parser.add_argument("--smart-save", default="on", choices=["on", "off"])
+    parser.add_argument("--smart-save-window", type=int, default=10)
+    parser.add_argument("--smart-save-min-improve", type=float, default=2.0)
+    parser.add_argument("--smart-save-max-mel", type=float, default=16.0)
+    parser.add_argument("--smart-save-cooldown", type=int, default=5)
+    parser.add_argument("--smart-save-min-step", type=int, default=10)
     return parser.parse_args()
 
 
@@ -401,6 +407,20 @@ def main() -> int:
             cmd += ["--dataset-dir", args.dataset_dir]
         if args.learning_rate > 0:
             cmd += ["--learning-rate", str(args.learning_rate)]
+        cmd += [
+            "--smart-save",
+            args.smart_save,
+            "--smart-save-window",
+            str(max(1, int(args.smart_save_window))),
+            "--smart-save-min-improve",
+            str(float(args.smart_save_min_improve)),
+            "--smart-save-max-mel",
+            str(float(args.smart_save_max_mel)),
+            "--smart-save-cooldown",
+            str(max(0, int(args.smart_save_cooldown))),
+            "--smart-save-min-step",
+            str(max(1, int(args.smart_save_min_step))),
+        ]
         run_plan = [("local experimental training", cmd, NOW_DIR)]
     else:
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_full_train.py"
@@ -432,6 +452,20 @@ def main() -> int:
             stage1_cmd += ["--dataset-dir", args.dataset_dir]
         if args.learning_rate > 0:
             stage1_cmd += ["--learning-rate", str(args.learning_rate)]
+        stage1_cmd += [
+            "--smart-save",
+            args.smart_save,
+            "--smart-save-window",
+            str(max(1, int(args.smart_save_window))),
+            "--smart-save-min-improve",
+            str(float(args.smart_save_min_improve)),
+            "--smart-save-max-mel",
+            str(float(args.smart_save_max_mel)),
+            "--smart-save-cooldown",
+            str(max(0, int(args.smart_save_cooldown))),
+            "--smart-save-min-step",
+            str(max(1, int(args.smart_save_min_step))),
+        ]
 
         stage2_init = _resolve_stage2_init(exp_dir, args.init_checkpoint)
         stage2_cmd = [
@@ -457,6 +491,20 @@ def main() -> int:
         if args.dataset_dir:
             stage2_cmd += ["--dataset-dir", args.dataset_dir]
         stage2_cmd += ["--learning-rate", str(stage2_lr)]
+        stage2_cmd += [
+            "--smart-save",
+            args.smart_save,
+            "--smart-save-window",
+            str(max(1, int(args.smart_save_window))),
+            "--smart-save-min-improve",
+            str(float(args.smart_save_min_improve)),
+            "--smart-save-max-mel",
+            str(float(args.smart_save_max_mel)),
+            "--smart-save-cooldown",
+            str(max(0, int(args.smart_save_cooldown))),
+            "--smart-save-min-step",
+            str(max(1, int(args.smart_save_min_step))),
+        ]
         if stage2_init is not None:
             stage2_cmd += ["--init-checkpoint", str(stage2_init)]
 
