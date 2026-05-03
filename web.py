@@ -906,6 +906,13 @@ def change_f0(if_f0_3, sr2, version19):  # f0method8,pretrained_G14,pretrained_D
     )
 
 
+def change_v3_finetune_visibility(version19, v3_enable_rvc_stage2):
+    return {
+        "visible": version19 == "v3" and bool(v3_enable_rvc_stage2),
+        "__type__": "update",
+    }
+
+
 def _ensure_mute_samples(sr: int, fea_dim: int):
     """Generate silent mute training samples under logs/mute/ if missing.
 
@@ -2512,21 +2519,20 @@ with gr.Blocks(title="RVC WebUI") as app:
                         value="full_paper_mode",
                         interactive=True,
                     )
-                    v3_train_preset_radio = gr.Radio(
-                        label=i18n("V3 training preset"),
-                        choices=["base_model", "fine_tune"],
-                        value="base_model",
-                        interactive=True,
-                        info=i18n(
-                            "base_model: 600 epochs, lr=1e-4 — train from scratch.\n"
-                            "fine_tune: 100 epochs, lr=3e-5 — short adaptation from a checkpoint."
-                        ),
-                    )
                     v3_enable_rvc_stage2 = gr.Checkbox(
                         label=i18n("Enable RVC Discriminator Fine-Tune (Stage 2)"),
                         value=True,
                         interactive=True,
                         info=i18n("Recommended final polishing step for V3 full-paper-mode training."),
+                    )
+                    v3_finetune_epoch26 = gr.Slider(
+                        minimum=2,
+                        maximum=1000,
+                        step=1,
+                        label=i18n("V3 fine-tune epochs (Stage 2 total_epoch)"),
+                        value=100,
+                        interactive=True,
+                        visible=True,
                     )
                     but_v3_stage2 = gr.Button(
                         i18n("Run V3 RVC Fine-Tune (Stage 2)"),
@@ -2739,11 +2745,6 @@ with gr.Blocks(title="RVC WebUI") as app:
                         value=100,
                         interactive=True,
                     )
-                    v3_train_preset_radio.change(
-                        v3_apply_preset,
-                        [v3_train_preset_radio],
-                        [total_epoch11, save_epoch10, batch_size12],
-                    )
                 with gr.Column():
                     pretrained_G14 = gr.Textbox(
                         label=i18n("Load pre-trained base model G path"),
@@ -2771,6 +2772,16 @@ with gr.Blocks(title="RVC WebUI") as app:
                         change_version19,
                         [sr2, if_f0_3, version19],
                         [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row, trainset_dir4, step2_md, step2_row],
+                    )
+                    version19.change(
+                        change_v3_finetune_visibility,
+                        [version19, v3_enable_rvc_stage2],
+                        [v3_finetune_epoch26],
+                    )
+                    v3_enable_rvc_stage2.change(
+                        change_v3_finetune_visibility,
+                        [version19, v3_enable_rvc_stage2],
+                        [v3_finetune_epoch26],
                     )
                     if_f0_3.change(
                         change_f0,
@@ -2812,9 +2823,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                         smart_save_min_step25,
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
+                        v3_finetune_epoch26,
                         version19,
                         author,
-                        v3_train_preset_radio,
                     ],
                     info3,
                     api_name="train_start",
@@ -2851,7 +2862,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         smart_save_max_mel23,
                         smart_save_cooldown24,
                         smart_save_min_step25,
-                        v3_train_preset_radio,
+                        v3_finetune_epoch26,
                     ],
                     info3,
                     api_name="v3_train_stage2",
@@ -2886,9 +2897,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                         smart_save_min_step25,
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
+                        v3_finetune_epoch26,
                         version19,
                         author,
-                        v3_train_preset_radio,
                     ],
                     info3,
                     api_name="train_start_all",
