@@ -617,6 +617,9 @@ def main() -> int:
     optimizer_d = None
     if discriminator is not None:
         optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=args.learning_rate, betas=(0.9, 0.999))
+    adv_batch_size = int(args.batch_size)
+    adv_fallback_batch_size = max(1, adv_batch_size // 2)
+    adv_fallback_activated = False
     seg_n = int(args.segment_seconds * args.sample_rate)
 
     phase_times = {"batch": 0.0, "cond": 0.0, "forward": 0.0, "loss": 0.0, "backward": 0.0}
@@ -648,6 +651,7 @@ def main() -> int:
         out_mel_ddsp = torch.nan_to_num(out["mel_ddsp"], nan=0.0, posinf=20.0, neginf=-20.0)
         out_noise = torch.nan_to_num(out["noise"], nan=0.0, posinf=20.0, neginf=-20.0)
         out_noise_pred = torch.nan_to_num(out["noise_pred"], nan=0.0, posinf=20.0, neginf=-20.0)
+        out_speaker_logits = torch.nan_to_num(out["speaker_logits"], nan=0.0, posinf=20.0, neginf=-20.0)
         recon_mel = waveform_to_mel(out_audio, args.sample_rate, args.mel_bins, args.hop_feature)
         recon_mel = torch.nan_to_num(recon_mel, nan=0.0, posinf=20.0, neginf=-20.0)
         pred_f0 = f0_autocorr(out_audio, args.sample_rate)
@@ -659,7 +663,12 @@ def main() -> int:
         loss_start = time.perf_counter()
         l_ddsp = F.mse_loss(out_mel_ddsp, target_mel) + 0.5 * F.mse_loss(recon_mel, target_mel)
         l_diff = F.mse_loss(out_noise_pred, out_noise)
-        l_spk = F.cross_entropy(out["speaker_logits"], speaker_ids)
+        if out_speaker_logits.shape[-1] <= 1:
+            l_spk = torch.zeros((), device=device)
+        else:
+            l_spk = F.cross_entropy(out_speaker_logits, speaker_ids)
+            if not torch.isfinite(l_spk):
+                l_spk = torch.zeros((), device=device)
         l_f0 = F.l1_loss(pred_f0_stats, target_f0_stats)
         base_loss = (1.0 * l_ddsp) + (1.0 * l_diff) + (0.1 * l_spk) + (0.2 * l_f0)
         l_adv = torch.zeros((), device=device)
@@ -687,18 +696,63 @@ def main() -> int:
             discriminator.train()
             real_audio = audio.unsqueeze(1)
             fake_audio = out_audio.unsqueeze(1)
+            if adv_batch_size < real_audio.shape[0]:
+                real_audio_adv = real_audio[:adv_batch_size]
+                fake_audio_adv = fake_audio[:adv_batch_size]
+            else:
+                real_audio_adv = real_audio
+                fake_audio_adv = fake_audio
+
+            adv_path_ok = True
             optimizer_d.zero_grad(set_to_none=True)
-            y_d_r, y_d_g, _, _ = discriminator(real_audio, fake_audio.detach())
+            y_d_r, y_d_g, _, _ = discriminator(real_audio_adv, fake_audio_adv.detach())
             l_disc, _, _ = discriminator_loss(y_d_r, y_d_g)
-            l_disc.backward()
-            nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
-            optimizer_d.step()
+            if torch.isfinite(l_disc):
+                l_disc.backward()
+                nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
+                optimizer_d.step()
+            else:
+                adv_path_ok = False
+                l_disc = torch.zeros((), device=device)
+                optimizer_d.zero_grad(set_to_none=True)
+                print("[warn] Non-finite discriminator loss at step %s; skipping adversarial update." % global_step)
+                if not adv_fallback_activated and adv_fallback_batch_size < adv_batch_size:
+                    old_adv_batch_size = adv_batch_size
+                    adv_batch_size = adv_fallback_batch_size
+                    adv_fallback_activated = True
+                    print(
+                        "[warn] Stage 2 auto-fallback: adversarial batch size %d -> %d after non-finite discriminator loss."
+                        % (old_adv_batch_size, adv_batch_size)
+                    )
 
             optimizer.zero_grad(set_to_none=True)
-            y_d_r, y_d_g, fmap_r, fmap_g = discriminator(real_audio, fake_audio)
-            l_adv, _ = generator_loss(y_d_g)
-            l_fm = feature_loss(fmap_r, fmap_g)
-            loss = (0.75 * base_loss) + (0.05 * l_adv) + (0.5 * l_fm)
+            if adv_path_ok:
+                y_d_r, y_d_g, fmap_r, fmap_g = discriminator(real_audio_adv, fake_audio_adv)
+                l_adv, _ = generator_loss(y_d_g)
+                l_fm = feature_loss(fmap_r, fmap_g)
+                if torch.isfinite(l_adv) and torch.isfinite(l_fm):
+                    loss = (0.75 * base_loss) + (0.05 * l_adv) + (0.5 * l_fm)
+                else:
+                    print("[warn] Non-finite adversarial generator loss at step %s; using base loss only." % global_step)
+                    l_adv = torch.zeros((), device=device)
+                    l_fm = torch.zeros((), device=device)
+                    loss = base_loss
+                    if not adv_fallback_activated and adv_fallback_batch_size < adv_batch_size:
+                        old_adv_batch_size = adv_batch_size
+                        adv_batch_size = adv_fallback_batch_size
+                        adv_fallback_activated = True
+                        print(
+                            "[warn] Stage 2 auto-fallback: adversarial batch size %d -> %d after non-finite adversarial generator loss."
+                            % (old_adv_batch_size, adv_batch_size)
+                        )
+            else:
+                l_adv = torch.zeros((), device=device)
+                l_fm = torch.zeros((), device=device)
+                loss = base_loss
+
+            if not torch.isfinite(loss):
+                print("[error] Non-finite combined Stage %s loss at step %s" % (args.stage, global_step))
+                return 2
             loss.backward()
         else:
             optimizer.zero_grad(set_to_none=True)
@@ -794,6 +848,8 @@ def main() -> int:
         "hop_feature": args.hop_feature,
         "hop_infer": args.hop_infer,
         "batch_size": args.batch_size,
+        "stage2_adv_batch_size_final": adv_batch_size if args.stage == "2" else 0,
+        "stage2_adv_batch_fallback_activated": bool(adv_fallback_activated) if args.stage == "2" else False,
         "steps": args.steps,
         "learning_rate": args.learning_rate,
         "smart_save": {
