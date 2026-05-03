@@ -10,6 +10,7 @@ DDSP/diffusion while matching the paper's data shapes and loss layout.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import random
@@ -112,6 +113,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-checkpoint", default="")
     parser.add_argument("--discriminator-checkpoint", default="assets/pretrained_v2/f0D48k.pth")
     parser.add_argument("--rmvpe", default="auto", choices=["auto", "on", "off"])
+    parser.add_argument("--stage2-rmvpe-frame-loss", default="off", choices=["off", "on", "auto"])
+    parser.add_argument("--stage2-rmvpe-frame-loss-weight", type=float, default=0.05)
+    parser.add_argument("--stage2-rmvpe-hop", type=int, default=256)
+    parser.add_argument("--stage2-disc-nan-patience", type=int, default=8)
+    parser.add_argument("--stage2-disc-retry-interval", type=int, default=200)
+    parser.add_argument("--stage2-disc-lr-decay", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -364,7 +371,53 @@ def extract_f0_stats_np(wav: np.ndarray, sample_rate: int, rmvpe_model) -> np.nd
     return np.array([float(f0.mean()), float(f0.std())], dtype=np.float32)
 
 
-def load_dataset(dataset_dir: Path, sample_rate: int, min_clip_seconds: float, rmvpe_model):
+def _rmvpe_cache_path(cache_dir: Path, wav_path: Path, sample_rate: int, hop: int) -> Path:
+    st = wav_path.stat()
+    stamp = "%s|%d|%d|%d|%d" % (str(wav_path), st.st_size, int(st.st_mtime), sample_rate, hop)
+    key = hashlib.sha1(stamp.encode("utf-8")).hexdigest()
+    return cache_dir / (key + ".npy")
+
+
+def _load_or_compute_rmvpe_f0(
+    wav_path: Path,
+    wav: np.ndarray,
+    sample_rate: int,
+    hop: int,
+    rmvpe_model,
+    cache_dir: Path,
+) -> np.ndarray | None:
+    if rmvpe_model is None:
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = _rmvpe_cache_path(cache_dir, wav_path, sample_rate, hop)
+    if cache_path.exists():
+        try:
+            cached = np.load(str(cache_path), allow_pickle=False)
+            if cached.ndim == 1 and cached.size > 0:
+                return cached.astype(np.float32, copy=False)
+        except Exception:
+            pass
+    try:
+        p_len = max(1, int(wav.shape[0] // max(1, hop)))
+        f0 = rmvpe_model.compute_f0(wav, p_len=p_len, filter_radius=0.03)
+        f0 = np.asarray(f0, dtype=np.float32).reshape(-1)
+        if f0.size == 0:
+            return None
+        np.save(str(cache_path), f0, allow_pickle=False)
+        return f0
+    except Exception:
+        return None
+
+
+def load_dataset(
+    dataset_dir: Path,
+    sample_rate: int,
+    min_clip_seconds: float,
+    rmvpe_model,
+    enable_rmvpe_frame_cache: bool,
+    rmvpe_hop: int,
+    rmvpe_cache_dir: Path | None,
+):
     min_samples = int(min_clip_seconds * sample_rate)
     wav_paths = sorted(dataset_dir.rglob("*.wav"))
     if not wav_paths:
@@ -392,6 +445,17 @@ def load_dataset(dataset_dir: Path, sample_rate: int, min_clip_seconds: float, r
                 "f0_stats": extract_f0_stats_np(wav, sample_rate, rmvpe_model),
             }
         )
+        if enable_rmvpe_frame_cache and rmvpe_cache_dir is not None:
+            rmvpe_f0 = _load_or_compute_rmvpe_f0(
+                wav_path,
+                wav,
+                sample_rate,
+                rmvpe_hop,
+                rmvpe_model,
+                rmvpe_cache_dir,
+            )
+            if rmvpe_f0 is not None:
+                samples[-1]["rmvpe_f0"] = rmvpe_f0
     return samples, speaker_table
 
 
@@ -402,6 +466,15 @@ def random_crop(wav: np.ndarray, n: int) -> np.ndarray:
         return out
     start = random.randint(0, wav.shape[0] - n)
     return wav[start : start + n]
+
+
+def random_crop_with_start(wav: np.ndarray, n: int) -> tuple[np.ndarray, int]:
+    if wav.shape[0] <= n:
+        out = np.zeros(n, dtype=np.float32)
+        out[: wav.shape[0]] = wav
+        return out, 0
+    start = random.randint(0, wav.shape[0] - n)
+    return wav[start : start + n], start
 
 
 class EVAModule(nn.Module):
@@ -563,11 +636,28 @@ def main() -> int:
 
     device = choose_device(args.device)
     rmvpe_model = maybe_make_rmvpe(device, args.rmvpe)
+    stage2_rmvpe_frame_loss = args.stage == "2" and args.stage2_rmvpe_frame_loss in ("on", "auto")
+    if stage2_rmvpe_frame_loss and rmvpe_model is None and args.stage2_rmvpe_frame_loss == "on":
+        print("[warn] Stage 2 RMVPE frame loss requested but RMVPE is unavailable; disabling frame loss.")
+        stage2_rmvpe_frame_loss = False
+    if stage2_rmvpe_frame_loss and rmvpe_model is None and args.stage2_rmvpe_frame_loss == "auto":
+        stage2_rmvpe_frame_loss = False
     print("[info] device:", device)
     print("[info] rmvpe:", "enabled" if rmvpe_model is not None else "fallback")
+    print("[info] stage2_rmvpe_frame_loss:", "enabled" if stage2_rmvpe_frame_loss else "disabled")
+
+    rmvpe_cache_dir = exp_dir / "hqsvc_full" / "rmvpe_f0_cache"
 
     load_start = time.perf_counter()
-    samples, speaker_table = load_dataset(dataset_dir, args.sample_rate, args.min_clip_seconds, rmvpe_model)
+    samples, speaker_table = load_dataset(
+        dataset_dir,
+        args.sample_rate,
+        args.min_clip_seconds,
+        rmvpe_model,
+        stage2_rmvpe_frame_loss,
+        int(args.stage2_rmvpe_hop),
+        rmvpe_cache_dir,
+    )
     print("[timing] dataset_load=%.3fs" % (time.perf_counter() - load_start))
     if not samples:
         print("[error] no usable wav clips found in:", dataset_dir)
@@ -620,6 +710,9 @@ def main() -> int:
     adv_batch_size = int(args.batch_size)
     adv_fallback_batch_size = max(1, adv_batch_size // 2)
     adv_fallback_activated = False
+    disc_nonfinite_streak = 0
+    adv_disabled_until_step = -1
+    adv_disable_events = 0
     seg_n = int(args.segment_seconds * args.sample_rate)
 
     phase_times = {"batch": 0.0, "cond": 0.0, "forward": 0.0, "loss": 0.0, "backward": 0.0}
@@ -631,7 +724,24 @@ def main() -> int:
     while global_step < args.steps:
         step_start = time.perf_counter()
         chosen = [random.choice(samples) for _ in range(args.batch_size)]
-        batch_np = np.stack([random_crop(s["wav"], seg_n) for s in chosen], axis=0)
+        cropped_audio = []
+        rmvpe_f0_targets = []
+        for s in chosen:
+            wav_crop, crop_start = random_crop_with_start(s["wav"], seg_n)
+            cropped_audio.append(wav_crop)
+            if stage2_rmvpe_frame_loss:
+                rmvpe_full = s.get("rmvpe_f0")
+                if isinstance(rmvpe_full, np.ndarray) and rmvpe_full.size > 0:
+                    hop = max(1, int(args.stage2_rmvpe_hop))
+                    start_f = int(crop_start // hop)
+                    frames_n = max(1, int(seg_n // hop))
+                    seg = rmvpe_full[start_f : start_f + frames_n]
+                    if seg.size == 0:
+                        seg = np.zeros((1,), dtype=np.float32)
+                else:
+                    seg = np.zeros((1,), dtype=np.float32)
+                rmvpe_f0_targets.append(seg.astype(np.float32, copy=False))
+        batch_np = np.stack(cropped_audio, axis=0)
         speaker_ids = torch.tensor([s["speaker_id"] for s in chosen], device=device, dtype=torch.long)
         target_f0_stats = torch.tensor(np.stack([s["f0_stats"] for s in chosen], axis=0), device=device)
         audio = torch.from_numpy(batch_np).to(device=device, dtype=torch.float32)
@@ -657,6 +767,26 @@ def main() -> int:
         pred_f0 = f0_autocorr(out_audio, args.sample_rate)
         pred_f0_stats = torch.stack([pred_f0.mean(dim=-1), pred_f0.std(dim=-1)], dim=-1)
         pred_f0_stats = torch.nan_to_num(pred_f0_stats, nan=0.0, posinf=2000.0, neginf=0.0)
+        l_f0_frame = torch.zeros((), device=device)
+        if stage2_rmvpe_frame_loss:
+            target_frames = target_mel.shape[-1]
+            max_target_len = max(int(arr.shape[0]) for arr in rmvpe_f0_targets) if rmvpe_f0_targets else 1
+            rmvpe_np = np.zeros((len(rmvpe_f0_targets), max_target_len), dtype=np.float32)
+            for i, arr in enumerate(rmvpe_f0_targets):
+                take = min(max_target_len, int(arr.shape[0]))
+                if take > 0:
+                    rmvpe_np[i, :take] = arr[:take]
+            rmvpe_target = torch.from_numpy(rmvpe_np).to(device=device, dtype=torch.float32)
+            rmvpe_target = F.interpolate(
+                rmvpe_target.unsqueeze(1), size=target_frames, mode="linear", align_corners=False
+            ).squeeze(1)
+            pred_f0_frame = F.interpolate(pred_f0.unsqueeze(1), size=target_frames, mode="linear", align_corners=False).squeeze(1)
+            pred_log = torch.log1p(torch.clamp(pred_f0_frame, min=0.0))
+            target_log = torch.log1p(torch.clamp(rmvpe_target, min=0.0))
+            voiced_mask = (rmvpe_target > 1.0).float()
+            denom = torch.clamp(voiced_mask.sum(), min=1.0)
+            l_f0_frame = torch.abs(pred_log - target_log)
+            l_f0_frame = (l_f0_frame * voiced_mask).sum() / denom
         sync_device(device)
         phase_times["forward"] += time.perf_counter() - forward_start
 
@@ -670,7 +800,13 @@ def main() -> int:
             if not torch.isfinite(l_spk):
                 l_spk = torch.zeros((), device=device)
         l_f0 = F.l1_loss(pred_f0_stats, target_f0_stats)
-        base_loss = (1.0 * l_ddsp) + (1.0 * l_diff) + (0.1 * l_spk) + (0.2 * l_f0)
+        base_loss = (
+            (1.0 * l_ddsp)
+            + (1.0 * l_diff)
+            + (0.1 * l_spk)
+            + (0.2 * l_f0)
+            + (float(args.stage2_rmvpe_frame_loss_weight) * l_f0_frame)
+        )
         l_adv = torch.zeros((), device=device)
         l_fm = torch.zeros((), device=device)
         l_disc = torch.zeros((), device=device)
@@ -686,7 +822,7 @@ def main() -> int:
                     float(l_ddsp.detach().cpu()) if torch.isfinite(l_ddsp) else float("nan"),
                     float(l_diff.detach().cpu()) if torch.isfinite(l_diff) else float("nan"),
                     float(l_spk.detach().cpu()) if torch.isfinite(l_spk) else float("nan"),
-                    float(l_f0.detach().cpu()) if torch.isfinite(l_f0) else float("nan"),
+                    float((l_f0 + l_f0_frame).detach().cpu()) if torch.isfinite(l_f0) and torch.isfinite(l_f0_frame) else float("nan"),
                 )
             )
             return 2
@@ -704,26 +840,47 @@ def main() -> int:
                 fake_audio_adv = fake_audio
 
             adv_path_ok = True
-            optimizer_d.zero_grad(set_to_none=True)
-            y_d_r, y_d_g, _, _ = discriminator(real_audio_adv, fake_audio_adv.detach())
-            l_disc, _, _ = discriminator_loss(y_d_r, y_d_g)
-            if torch.isfinite(l_disc):
-                l_disc.backward()
-                nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
-                optimizer_d.step()
-            else:
-                adv_path_ok = False
-                l_disc = torch.zeros((), device=device)
+            adversarial_enabled = global_step >= adv_disabled_until_step
+            if adversarial_enabled:
                 optimizer_d.zero_grad(set_to_none=True)
-                print("[warn] Non-finite discriminator loss at step %s; skipping adversarial update." % global_step)
-                if not adv_fallback_activated and adv_fallback_batch_size < adv_batch_size:
-                    old_adv_batch_size = adv_batch_size
-                    adv_batch_size = adv_fallback_batch_size
-                    adv_fallback_activated = True
-                    print(
-                        "[warn] Stage 2 auto-fallback: adversarial batch size %d -> %d after non-finite discriminator loss."
-                        % (old_adv_batch_size, adv_batch_size)
-                    )
+                y_d_r, y_d_g, _, _ = discriminator(real_audio_adv, fake_audio_adv.detach())
+                l_disc, _, _ = discriminator_loss(y_d_r, y_d_g)
+                if torch.isfinite(l_disc):
+                    l_disc.backward()
+                    nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
+                    optimizer_d.step()
+                    disc_nonfinite_streak = 0
+                else:
+                    adv_path_ok = False
+                    l_disc = torch.zeros((), device=device)
+                    optimizer_d.zero_grad(set_to_none=True)
+                    disc_nonfinite_streak += 1
+                    print("[warn] Non-finite discriminator loss at step %s; skipping adversarial update." % global_step)
+                    if not adv_fallback_activated and adv_fallback_batch_size < adv_batch_size:
+                        old_adv_batch_size = adv_batch_size
+                        adv_batch_size = adv_fallback_batch_size
+                        adv_fallback_activated = True
+                        print(
+                            "[warn] Stage 2 auto-fallback: adversarial batch size %d -> %d after non-finite discriminator loss."
+                            % (old_adv_batch_size, adv_batch_size)
+                        )
+                    if disc_nonfinite_streak >= max(1, int(args.stage2_disc_nan_patience)):
+                        adv_disable_events += 1
+                        retry_interval = max(1, int(args.stage2_disc_retry_interval))
+                        adv_disabled_until_step = global_step + retry_interval
+                        lr_decay = float(args.stage2_disc_lr_decay)
+                        for pg in optimizer_d.param_groups:
+                            pg["lr"] = max(1e-6, float(pg.get("lr", args.learning_rate)) * lr_decay)
+                        optimizer_d.state.clear()
+                        print(
+                            "[warn] Stage 2 adversarial circuit-breaker: %d consecutive non-finite discriminator steps; "
+                            "disabling adversarial path until step %d and decaying discriminator lr."
+                            % (disc_nonfinite_streak, adv_disabled_until_step)
+                        )
+                        disc_nonfinite_streak = 0
+            else:
+                l_disc = torch.zeros((), device=device)
+                adv_path_ok = False
 
             optimizer.zero_grad(set_to_none=True)
             if adv_path_ok:
@@ -737,6 +894,7 @@ def main() -> int:
                     l_adv = torch.zeros((), device=device)
                     l_fm = torch.zeros((), device=device)
                     loss = base_loss
+                    disc_nonfinite_streak += 1
                     if not adv_fallback_activated and adv_fallback_batch_size < adv_batch_size:
                         old_adv_batch_size = adv_batch_size
                         adv_batch_size = adv_fallback_batch_size
@@ -745,6 +903,20 @@ def main() -> int:
                             "[warn] Stage 2 auto-fallback: adversarial batch size %d -> %d after non-finite adversarial generator loss."
                             % (old_adv_batch_size, adv_batch_size)
                         )
+                    if disc_nonfinite_streak >= max(1, int(args.stage2_disc_nan_patience)):
+                        adv_disable_events += 1
+                        retry_interval = max(1, int(args.stage2_disc_retry_interval))
+                        adv_disabled_until_step = global_step + retry_interval
+                        lr_decay = float(args.stage2_disc_lr_decay)
+                        for pg in optimizer_d.param_groups:
+                            pg["lr"] = max(1e-6, float(pg.get("lr", args.learning_rate)) * lr_decay)
+                        optimizer_d.state.clear()
+                        print(
+                            "[warn] Stage 2 adversarial circuit-breaker: %d consecutive non-finite adversarial steps; "
+                            "disabling adversarial path until step %d and decaying discriminator lr."
+                            % (disc_nonfinite_streak, adv_disabled_until_step)
+                        )
+                        disc_nonfinite_streak = 0
             else:
                 l_adv = torch.zeros((), device=device)
                 l_fm = torch.zeros((), device=device)
@@ -799,7 +971,7 @@ def main() -> int:
                 for key in ["batch", "cond", "forward", "loss", "backward"]
             )
             print(
-                "[step %d/%d][stage %s] loss=%.4f ddsp=%.4f diff=%.4f spk=%.4f f0=%.4f adv=%.4f fm=%.4f disc=%.4f time=%.1fs"
+                "[step %d/%d][stage %s] loss=%.4f ddsp=%.4f diff=%.4f spk=%.4f f0=%.4f f0frm=%.4f adv=%.4f fm=%.4f disc=%.4f time=%.1fs"
                 % (
                     global_step,
                     args.steps,
@@ -809,6 +981,7 @@ def main() -> int:
                     float(l_diff.item()),
                     float(l_spk.item()),
                     float(l_f0.item()),
+                    float(l_f0_frame.item()),
                     float(l_adv.item()),
                     float(l_fm.item()),
                     float(l_disc.item()),
@@ -850,6 +1023,10 @@ def main() -> int:
         "batch_size": args.batch_size,
         "stage2_adv_batch_size_final": adv_batch_size if args.stage == "2" else 0,
         "stage2_adv_batch_fallback_activated": bool(adv_fallback_activated) if args.stage == "2" else False,
+        "stage2_adv_disable_events": int(adv_disable_events) if args.stage == "2" else 0,
+        "stage2_rmvpe_frame_loss": bool(stage2_rmvpe_frame_loss) if args.stage == "2" else False,
+        "stage2_rmvpe_frame_loss_weight": float(args.stage2_rmvpe_frame_loss_weight) if args.stage == "2" else 0.0,
+        "stage2_rmvpe_hop": int(args.stage2_rmvpe_hop) if args.stage == "2" else 0,
         "steps": args.steps,
         "learning_rate": args.learning_rate,
         "smart_save": {

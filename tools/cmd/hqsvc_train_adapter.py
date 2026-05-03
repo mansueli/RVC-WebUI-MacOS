@@ -267,6 +267,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--smart-save-max-mel", type=float, default=16.0)
     parser.add_argument("--smart-save-cooldown", type=int, default=5)
     parser.add_argument("--smart-save-min-step", type=int, default=10)
+    parser.add_argument(
+        "--stage2-rmvpe-frame-loss",
+        default="auto",
+        choices=["off", "on", "auto"],
+        help="Optional Stage 2 frame-level RMVPE pitch loss.",
+    )
+    parser.add_argument("--stage2-rmvpe-frame-loss-weight", type=float, default=0.05)
+    parser.add_argument("--stage2-rmvpe-hop", type=int, default=256)
     return parser.parse_args()
 
 
@@ -513,6 +521,12 @@ def main() -> int:
             str(max(0, int(args.smart_save_cooldown))),
             "--smart-save-min-step",
             str(max(1, int(args.smart_save_min_step))),
+            "--stage2-rmvpe-frame-loss",
+            args.stage2_rmvpe_frame_loss,
+            "--stage2-rmvpe-frame-loss-weight",
+            str(float(args.stage2_rmvpe_frame_loss_weight)),
+            "--stage2-rmvpe-hop",
+            str(max(64, int(args.stage2_rmvpe_hop))),
         ]
         if stage2_init is not None:
             stage2_cmd += ["--init-checkpoint", str(stage2_init)]

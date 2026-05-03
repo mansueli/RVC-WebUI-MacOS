@@ -907,10 +907,9 @@ def change_f0(if_f0_3, sr2, version19):  # f0method8,pretrained_G14,pretrained_D
 
 
 def change_v3_finetune_visibility(version19, v3_enable_rvc_stage2):
-    return {
-        "visible": version19 == "v3" and bool(v3_enable_rvc_stage2),
-        "__type__": "update",
-    }
+    visible = version19 == "v3" and bool(v3_enable_rvc_stage2)
+    update = {"visible": visible, "__type__": "update"}
+    return update, update, update, update
 
 
 def _ensure_mute_samples(sr: int, fea_dim: int):
@@ -1154,6 +1153,9 @@ def click_train(
     v3_train_backend19,
     v3_enable_rvc_stage2,
     v3_finetune_epoch26,
+    v3_stage2_rmvpe_frame_loss27,
+    v3_stage2_rmvpe_frame_loss_weight28,
+    v3_stage2_rmvpe_hop29,
     version19,
     author,
     run_async=True,
@@ -1179,6 +1181,9 @@ def click_train(
             smart_save_cooldown24,
             smart_save_min_step25,
             v3_finetune_epoch26,
+            v3_stage2_rmvpe_frame_loss27,
+            v3_stage2_rmvpe_frame_loss_weight28,
+            v3_stage2_rmvpe_hop29,
             run_async=run_async,
         )
 
@@ -1508,6 +1513,9 @@ def train1key(
     v3_train_backend19,
     v3_enable_rvc_stage2,
     v3_finetune_epoch26,
+    v3_stage2_rmvpe_frame_loss27,
+    v3_stage2_rmvpe_frame_loss_weight28,
+    v3_stage2_rmvpe_hop29,
     version19,
     author,
 ):
@@ -1596,6 +1604,9 @@ def train1key(
         v3_train_backend19,
         v3_enable_rvc_stage2,
         v3_finetune_epoch26,
+        v3_stage2_rmvpe_frame_loss27,
+        v3_stage2_rmvpe_frame_loss_weight28,
+        v3_stage2_rmvpe_hop29,
         version19,
         author,
         run_async=False,
@@ -1812,6 +1823,9 @@ def _launch_v3_training(
     smart_save_cooldown24,
     smart_save_min_step25,
     v3_finetune_epoch26,
+    v3_stage2_rmvpe_frame_loss27,
+    v3_stage2_rmvpe_frame_loss_weight28,
+    v3_stage2_rmvpe_hop29,
     v3_stage="1",
     run_async=True,
 ):
@@ -1866,6 +1880,9 @@ def _launch_v3_training(
         ' --smart-save-max-mel %s'
         ' --smart-save-cooldown %s'
         ' --smart-save-min-step %s'
+        ' --stage2-rmvpe-frame-loss %s'
+        ' --stage2-rmvpe-frame-loss-weight %s'
+        ' --stage2-rmvpe-hop %s'
         ' --stage %s'
         ' --backend "%s"'
         ' --author "%s"'
@@ -1888,6 +1905,9 @@ def _launch_v3_training(
             float(smart_save_max_mel23),
             int(smart_save_cooldown24),
             int(smart_save_min_step25),
+            str(v3_stage2_rmvpe_frame_loss27 or "on"),
+            float(v3_stage2_rmvpe_frame_loss_weight28),
+            int(v3_stage2_rmvpe_hop29),
             v3_stage,
             v3_train_backend or "full_paper_mode",
             author,
@@ -1967,6 +1987,9 @@ def click_train_v3(
     smart_save_cooldown24,
     smart_save_min_step25,
     v3_finetune_epoch26,
+    v3_stage2_rmvpe_frame_loss27,
+    v3_stage2_rmvpe_frame_loss_weight28,
+    v3_stage2_rmvpe_hop29,
     run_async=True,
 ):
     stage = "both" if v3_enable_rvc_stage2 else "1"
@@ -1988,6 +2011,9 @@ def click_train_v3(
         smart_save_cooldown24,
         smart_save_min_step25,
         v3_finetune_epoch26,
+        v3_stage2_rmvpe_frame_loss27,
+        v3_stage2_rmvpe_frame_loss_weight28,
+        v3_stage2_rmvpe_hop29,
         v3_stage=stage,
         run_async=run_async,
     )
@@ -2011,6 +2037,9 @@ def click_train_v3_stage2(
     smart_save_cooldown24,
     smart_save_min_step25,
     v3_finetune_epoch26,
+    v3_stage2_rmvpe_frame_loss27,
+    v3_stage2_rmvpe_frame_loss_weight28,
+    v3_stage2_rmvpe_hop29,
 ):
     return _launch_v3_training(
         exp_dir1,
@@ -2030,6 +2059,9 @@ def click_train_v3_stage2(
         smart_save_cooldown24,
         smart_save_min_step25,
         v3_finetune_epoch26,
+        v3_stage2_rmvpe_frame_loss27,
+        v3_stage2_rmvpe_frame_loss_weight28,
+        v3_stage2_rmvpe_hop29,
         v3_stage="2",
         run_async=True,
     )
@@ -2534,6 +2566,31 @@ with gr.Blocks(title="RVC WebUI") as app:
                         interactive=True,
                         visible=True,
                     )
+                    v3_stage2_rmvpe_frame_loss27 = gr.Radio(
+                        label=i18n("Stage 2 RMVPE frame-loss mode"),
+                        choices=["on", "auto", "off"],
+                        value="on",
+                        interactive=True,
+                        visible=True,
+                    )
+                    v3_stage2_rmvpe_frame_loss_weight28 = gr.Slider(
+                        minimum=0.0,
+                        maximum=0.5,
+                        step=0.01,
+                        label=i18n("Stage 2 RMVPE frame-loss weight"),
+                        value=0.05,
+                        interactive=True,
+                        visible=True,
+                    )
+                    v3_stage2_rmvpe_hop29 = gr.Slider(
+                        minimum=64,
+                        maximum=512,
+                        step=64,
+                        label=i18n("Stage 2 RMVPE frame hop"),
+                        value=256,
+                        interactive=True,
+                        visible=True,
+                    )
                     but_v3_stage2 = gr.Button(
                         i18n("Run V3 RVC Fine-Tune (Stage 2)"),
                         variant="secondary",
@@ -2776,12 +2833,22 @@ with gr.Blocks(title="RVC WebUI") as app:
                     version19.change(
                         change_v3_finetune_visibility,
                         [version19, v3_enable_rvc_stage2],
-                        [v3_finetune_epoch26],
+                        [
+                            v3_finetune_epoch26,
+                            v3_stage2_rmvpe_frame_loss27,
+                            v3_stage2_rmvpe_frame_loss_weight28,
+                            v3_stage2_rmvpe_hop29,
+                        ],
                     )
                     v3_enable_rvc_stage2.change(
                         change_v3_finetune_visibility,
                         [version19, v3_enable_rvc_stage2],
-                        [v3_finetune_epoch26],
+                        [
+                            v3_finetune_epoch26,
+                            v3_stage2_rmvpe_frame_loss27,
+                            v3_stage2_rmvpe_frame_loss_weight28,
+                            v3_stage2_rmvpe_hop29,
+                        ],
                     )
                     if_f0_3.change(
                         change_f0,
@@ -2824,6 +2891,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
                         v3_finetune_epoch26,
+                        v3_stage2_rmvpe_frame_loss27,
+                        v3_stage2_rmvpe_frame_loss_weight28,
+                        v3_stage2_rmvpe_hop29,
                         version19,
                         author,
                     ],
@@ -2863,6 +2933,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                         smart_save_cooldown24,
                         smart_save_min_step25,
                         v3_finetune_epoch26,
+                        v3_stage2_rmvpe_frame_loss27,
+                        v3_stage2_rmvpe_frame_loss_weight28,
+                        v3_stage2_rmvpe_hop29,
                     ],
                     info3,
                     api_name="v3_train_stage2",
@@ -2898,6 +2971,9 @@ with gr.Blocks(title="RVC WebUI") as app:
                         v3_train_backend19,
                         v3_enable_rvc_stage2,
                         v3_finetune_epoch26,
+                        v3_stage2_rmvpe_frame_loss27,
+                        v3_stage2_rmvpe_frame_loss_weight28,
+                        v3_stage2_rmvpe_hop29,
                         version19,
                         author,
                     ],
