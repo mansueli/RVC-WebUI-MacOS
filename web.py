@@ -1146,9 +1146,9 @@ def click_train(
     smart_save_min_step25,
     v3_train_backend19,
     v3_enable_rvc_stage2,
+    v3_finetune_epoch26,
     version19,
     author,
-    v3_train_preset="base_model",
     run_async=True,
 ):
     # V3 uses the HQ-SVC-oriented training adapter, not the RVC trainer.
@@ -1171,7 +1171,7 @@ def click_train(
             smart_save_max_mel23,
             smart_save_cooldown24,
             smart_save_min_step25,
-            v3_train_preset=v3_train_preset,
+            v3_finetune_epoch26,
             run_async=run_async,
         )
 
@@ -1500,9 +1500,9 @@ def train1key(
     smart_save_min_step25,
     v3_train_backend19,
     v3_enable_rvc_stage2,
+    v3_finetune_epoch26,
     version19,
     author,
-    v3_train_preset="base_model",
 ):
     infos = []
 
@@ -1588,9 +1588,9 @@ def train1key(
         smart_save_min_step25,
         v3_train_backend19,
         v3_enable_rvc_stage2,
+        v3_finetune_epoch26,
         version19,
         author,
-        v3_train_preset,
         run_async=False,
     )
     yield get_info_str(train_result)
@@ -1787,32 +1787,6 @@ def v3_preprocess_dataset(v3_source_dir, exp_dir1, v3_preprocess_backend):
         yield status_rendered + "\n\n[V3 Preprocess] Finished (exit code %s)." % rc
 
 
-_V3_PRESETS = {
-    "base_model": {
-        "total_epoch": 600,
-        "save_epoch": 25,
-        "batch_size": 6,
-        "lr": 1.0e-4,
-        "segment_seconds": 2.8,
-        "label": "Base Model — from scratch, long run, lower LR",
-    },
-    "fine_tune": {
-        "total_epoch": 100,
-        "save_epoch": 10,
-        "batch_size": 4,
-        "lr": 3.0e-5,
-        "segment_seconds": 2.0,
-        "label": "Fine Tune — short adaptation from existing checkpoint, low LR",
-    },
-}
-
-
-def v3_apply_preset(preset_name: str):
-    """Return updated slider values for the chosen V3 training preset."""
-    p = _V3_PRESETS.get(preset_name or "base_model", _V3_PRESETS["base_model"])
-    return p["total_epoch"], p["save_epoch"], p["batch_size"]
-
-
 def _launch_v3_training(
     exp_dir1,
     sr2,
@@ -1830,7 +1804,7 @@ def _launch_v3_training(
     smart_save_max_mel23,
     smart_save_cooldown24,
     smart_save_min_step25,
-    v3_train_preset="base_model",
+    v3_finetune_epoch26,
     v3_stage="1",
     run_async=True,
 ):
@@ -1858,10 +1832,13 @@ def _launch_v3_training(
         epoch_count = int(total_epoch11)
     except Exception:
         epoch_count = 0
-    _preset_cfg = _V3_PRESETS.get(v3_train_preset or "base_model", _V3_PRESETS["base_model"])
-    _steps_floor = 1500 if (v3_train_preset == "fine_tune") else 4000
-    v3_steps = max(_steps_floor, min(20000, epoch_count * 12))
-    v3_lr = _preset_cfg["lr"]
+    try:
+        stage2_epoch_count = int(v3_finetune_epoch26)
+    except Exception:
+        stage2_epoch_count = 100
+    v3_steps = max(50, min(20000, epoch_count * 12))
+    v3_stage2_steps = max(50, min(20000, stage2_epoch_count * 12))
+    v3_lr = 1.0e-4
     v3_stage = str(v3_stage or "1")
 
     adapter_cmd = (
@@ -1874,6 +1851,7 @@ def _launch_v3_training(
         ' --batch-size %s'
         ' --save-every-weights %s'
         ' --steps %s'
+        ' --stage2-steps %s'
         ' --learning-rate %s'
         ' --smart-save %s'
         ' --smart-save-window %s'
@@ -1895,6 +1873,7 @@ def _launch_v3_training(
             batch_size12,
             save_weights_flag,
             v3_steps,
+            v3_stage2_steps,
             v3_lr,
             "on" if smart_save_enable20 == i18n("Yes") else "off",
             int(smart_save_window21),
@@ -1980,7 +1959,7 @@ def click_train_v3(
     smart_save_max_mel23,
     smart_save_cooldown24,
     smart_save_min_step25,
-    v3_train_preset="base_model",
+    v3_finetune_epoch26,
     run_async=True,
 ):
     stage = "both" if v3_enable_rvc_stage2 else "1"
@@ -2001,7 +1980,7 @@ def click_train_v3(
         smart_save_max_mel23,
         smart_save_cooldown24,
         smart_save_min_step25,
-        v3_train_preset=v3_train_preset,
+        v3_finetune_epoch26,
         v3_stage=stage,
         run_async=run_async,
     )
@@ -2024,7 +2003,7 @@ def click_train_v3_stage2(
     smart_save_max_mel23,
     smart_save_cooldown24,
     smart_save_min_step25,
-    v3_train_preset="base_model",
+    v3_finetune_epoch26,
 ):
     return _launch_v3_training(
         exp_dir1,
@@ -2043,7 +2022,7 @@ def click_train_v3_stage2(
         smart_save_max_mel23,
         smart_save_cooldown24,
         smart_save_min_step25,
-        v3_train_preset=v3_train_preset,
+        v3_finetune_epoch26,
         v3_stage="2",
         run_async=True,
     )
