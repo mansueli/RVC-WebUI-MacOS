@@ -598,7 +598,18 @@ def main() -> int:
         print("[info] loaded checkpoint:", init_checkpoint)
         if missing or unexpected:
             print("[warn] model checkpoint mismatch missing=%d unexpected=%d" % (len(missing), len(unexpected)))
-        global_step = int(payload.get("global_step", 0) or 0)
+        loaded_step = int(payload.get("global_step", 0) or 0)
+        loaded_stage = str(payload.get("training_stage", "") or "")
+        # If Stage 2 is initialized from a Stage 1 checkpoint, start Stage 2 from step 0.
+        # Only keep loaded step when explicitly resuming a Stage 2 checkpoint.
+        if args.stage == "2" and loaded_stage != "2":
+            global_step = 0
+            print(
+                "[info] stage2 init from non-stage2 checkpoint (training_stage=%s, global_step=%s); "
+                "resetting step counter to 0" % (loaded_stage or "unknown", loaded_step)
+            )
+        else:
+            global_step = loaded_step
     else:
         global_step = 0
 
