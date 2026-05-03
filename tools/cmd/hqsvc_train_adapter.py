@@ -233,6 +233,12 @@ def parse_args() -> argparse.Namespace:
         help="Training steps for local_experimental/full_paper_mode backends.",
     )
     parser.add_argument(
+        "--stage2-steps",
+        type=int,
+        default=0,
+        help="Optional explicit step count for Stage 2 (full_paper_mode). 0 = auto from --steps.",
+    )
+    parser.add_argument(
         "--device",
         default="auto",
         choices=["auto", "cpu", "cuda", "mps"],
@@ -425,7 +431,10 @@ def main() -> int:
     else:
         train_launcher = NOW_DIR / "tools" / "cmd" / "hqsvc_full_train.py"
         stage1_steps = max(50, int(args.steps))
-        stage2_steps = max(800, min(6000, max(1, int(args.steps)) // 3))
+        if int(args.stage2_steps) > 0:
+            stage2_steps = max(50, int(args.stage2_steps))
+        else:
+            stage2_steps = max(800, min(6000, max(1, int(args.steps)) // 3))
         stage2_lr = args.learning_rate if args.learning_rate > 0 else 5e-5
         stage2_lr = min(stage2_lr, 5e-5)
         stage1_cmd = [
