@@ -10,11 +10,17 @@ DDSP/diffusion while matching the paper's data shapes and loss layout.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import random
+import sys
 import time
 from collections import deque
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 try:
     import numpy as np
@@ -45,6 +51,7 @@ try:
 except Exception:  # pragma: no cover
     RMVPE = None
 
+_DISCRIMINATOR_IMPORT_ERROR = ""
 try:
     from tools.cmd.rvc_discriminator import (
         MultiPeriodDiscriminator,
@@ -52,11 +59,25 @@ try:
         feature_loss,
         generator_loss,
     )
-except Exception:  # pragma: no cover
-    MultiPeriodDiscriminator = None
-    discriminator_loss = None
-    feature_loss = None
-    generator_loss = None
+except Exception as _disc_bridge_err:  # pragma: no cover
+    try:
+        _repo_root = Path(__file__).resolve().parent.parent.parent
+        _bridge = _repo_root / "tools" / "cmd" / "rvc_discriminator.py"
+        _spec = importlib.util.spec_from_file_location("_rvc_disc_bridge", str(_bridge))
+        if _spec is None or _spec.loader is None:
+            raise ImportError("Unable to load discriminator bridge from %s" % _bridge)
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        MultiPeriodDiscriminator = _mod.MultiPeriodDiscriminator
+        discriminator_loss = _mod.discriminator_loss
+        feature_loss = _mod.feature_loss
+        generator_loss = _mod.generator_loss
+    except Exception as _disc_err:  # pragma: no cover
+        _DISCRIMINATOR_IMPORT_ERROR = "%s ; fallback=%s" % (_disc_bridge_err, _disc_err)
+        MultiPeriodDiscriminator = None
+        discriminator_loss = None
+        feature_loss = None
+        generator_loss = None
 
 
 _STFT_WINDOW_CACHE: dict[tuple[int, str], torch.Tensor] = {}
@@ -384,8 +405,9 @@ def random_crop(wav: np.ndarray, n: int) -> np.ndarray:
 
 
 class EVAModule(nn.Module):
-    def __init__(self, hidden_dim: int, speaker_dim: int, cond_dim: int):
+    def __init__(self, hidden_dim: int, speaker_dim: int, cond_dim: int, max_tokens: int = 1024):
         super().__init__()
+        self.max_tokens = max(64, int(max_tokens))
         self.film = nn.Sequential(
             nn.Linear(speaker_dim + cond_dim, hidden_dim * 2),
             nn.GELU(),
@@ -407,6 +429,12 @@ class EVAModule(nn.Module):
         gamma = gamma.unsqueeze(-1)
         beta = beta.unsqueeze(-1)
         fused = content * (1.0 + torch.tanh(gamma)) + beta
+        t = fused.shape[-1]
+        if t > self.max_tokens:
+            # Bound attention memory by encoding a pooled sequence then expanding back.
+            pooled = F.interpolate(fused, size=self.max_tokens, mode="linear", align_corners=False)
+            encoded = self.encoder(pooled.transpose(1, 2)).transpose(1, 2)
+            return F.interpolate(encoded, size=t, mode="linear", align_corners=False)
         return self.encoder(fused.transpose(1, 2)).transpose(1, 2)
 
 
@@ -416,7 +444,7 @@ class DDSPHead(nn.Module):
         self.proj = nn.Conv1d(hidden_dim, mel_bins, kernel_size=1)
 
     def forward(self, fused: torch.Tensor, frames: int) -> torch.Tensor:
-        pooled = F.adaptive_avg_pool1d(fused, frames)
+        pooled = F.interpolate(fused, size=frames, mode="linear", align_corners=False)
         return self.proj(pooled)
 
 
@@ -521,6 +549,8 @@ def main() -> int:
         or generator_loss is None
     ):
         print("[error] RVC discriminator components are unavailable for Stage 2 fine-tuning.")
+        if _DISCRIMINATOR_IMPORT_ERROR:
+            print("[error] import detail:", _DISCRIMINATOR_IMPORT_ERROR)
         return 2
 
     repo_root = Path(__file__).resolve().parent.parent.parent
@@ -597,20 +627,27 @@ def main() -> int:
         cond_start = time.perf_counter()
         cond = build_condition(audio, args.sample_rate)
         target_mel = waveform_to_mel(audio, args.sample_rate, args.mel_bins, args.hop_feature)
+        target_mel = torch.nan_to_num(target_mel, nan=0.0, posinf=20.0, neginf=-20.0)
         sync_device(device)
         phase_times["cond"] += time.perf_counter() - cond_start
 
         forward_start = time.perf_counter()
         out = model(audio, cond, frames=target_mel.shape[-1])
-        recon_mel = waveform_to_mel(out["audio"], args.sample_rate, args.mel_bins, args.hop_feature)
-        pred_f0 = f0_autocorr(out["audio"], args.sample_rate)
+        out_audio = torch.nan_to_num(out["audio"], nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
+        out_mel_ddsp = torch.nan_to_num(out["mel_ddsp"], nan=0.0, posinf=20.0, neginf=-20.0)
+        out_noise = torch.nan_to_num(out["noise"], nan=0.0, posinf=20.0, neginf=-20.0)
+        out_noise_pred = torch.nan_to_num(out["noise_pred"], nan=0.0, posinf=20.0, neginf=-20.0)
+        recon_mel = waveform_to_mel(out_audio, args.sample_rate, args.mel_bins, args.hop_feature)
+        recon_mel = torch.nan_to_num(recon_mel, nan=0.0, posinf=20.0, neginf=-20.0)
+        pred_f0 = f0_autocorr(out_audio, args.sample_rate)
         pred_f0_stats = torch.stack([pred_f0.mean(dim=-1), pred_f0.std(dim=-1)], dim=-1)
+        pred_f0_stats = torch.nan_to_num(pred_f0_stats, nan=0.0, posinf=2000.0, neginf=0.0)
         sync_device(device)
         phase_times["forward"] += time.perf_counter() - forward_start
 
         loss_start = time.perf_counter()
-        l_ddsp = F.mse_loss(out["mel_ddsp"], target_mel) + 0.5 * F.mse_loss(recon_mel, target_mel)
-        l_diff = F.mse_loss(out["noise_pred"], out["noise"])
+        l_ddsp = F.mse_loss(out_mel_ddsp, target_mel) + 0.5 * F.mse_loss(recon_mel, target_mel)
+        l_diff = F.mse_loss(out_noise_pred, out_noise)
         l_spk = F.cross_entropy(out["speaker_logits"], speaker_ids)
         l_f0 = F.l1_loss(pred_f0_stats, target_f0_stats)
         base_loss = (1.0 * l_ddsp) + (1.0 * l_diff) + (0.1 * l_spk) + (0.2 * l_f0)
@@ -620,11 +657,25 @@ def main() -> int:
         sync_device(device)
         phase_times["loss"] += time.perf_counter() - loss_start
 
+        if not torch.isfinite(base_loss):
+            print(
+                "[error] Non-finite Stage %s loss at step %s: ddsp=%s diff=%s spk=%s f0=%s"
+                % (
+                    args.stage,
+                    global_step,
+                    float(l_ddsp.detach().cpu()) if torch.isfinite(l_ddsp) else float("nan"),
+                    float(l_diff.detach().cpu()) if torch.isfinite(l_diff) else float("nan"),
+                    float(l_spk.detach().cpu()) if torch.isfinite(l_spk) else float("nan"),
+                    float(l_f0.detach().cpu()) if torch.isfinite(l_f0) else float("nan"),
+                )
+            )
+            return 2
+
         backward_start = time.perf_counter()
         if discriminator is not None and optimizer_d is not None:
             discriminator.train()
             real_audio = audio.unsqueeze(1)
-            fake_audio = out["audio"].unsqueeze(1)
+            fake_audio = out_audio.unsqueeze(1)
             optimizer_d.zero_grad(set_to_none=True)
             y_d_r, y_d_g, _, _ = discriminator(real_audio, fake_audio.detach())
             l_disc, _, _ = discriminator_loss(y_d_r, y_d_g)

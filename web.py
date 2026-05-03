@@ -386,7 +386,14 @@ def inspect_experiment_progress(exp_dir1, if_f0_3, version19):
     return "\n".join(lines)
 
 
-def clear_experiment_artifacts(exp_dir1, if_f0_3, version19, clear_step1, clear_step2):
+def clear_experiment_artifacts(
+    exp_dir1,
+    if_f0_3,
+    version19,
+    clear_step1,
+    clear_step2,
+    clear_v3_training,
+):
     if not exp_dir1 or not exp_dir1.strip():
         return "Please enter an experiment name first."
 
@@ -415,6 +422,17 @@ def clear_experiment_artifacts(exp_dir1, if_f0_3, version19, clear_step1, clear_
                 exp_path / "3_feature256",
                 exp_path / "3_feature768",
                 exp_path / "extract_f0_feature.log",
+            ]
+        )
+    if clear_v3_training:
+        targets.extend(
+            [
+                exp_path / "hqsvc_full",
+                exp_path / "train_webui.log",
+                exp_path / "training_status.json",
+                exp_path / "training_pid.txt",
+                exp_path / "training_stop_after_epoch.flag",
+                exp_path / "training_stopped.flag",
             ]
         )
 
@@ -853,6 +871,7 @@ def change_version19(sr2, if_f0_3, version19):
     else:
         pretrained_g, pretrained_d = get_pretrained_models(path_str, f0_str, sr2)
     v3_row_visible = {"visible": version19 == "v3", "__type__": "update"}
+    step2_visible_update = {"visible": version19 != "v3", "__type__": "update"}
     if version19 == "v3":
         trainset_dir_update = {
             "visible": False,
@@ -874,6 +893,8 @@ def change_version19(sr2, if_f0_3, version19):
         to_return_sr2,
         v3_row_visible,
         trainset_dir_update,
+        step2_visible_update,
+        step2_visible_update,
     )
 
 
@@ -1515,27 +1536,33 @@ def train1key(
             )
         ]
 
-    # step2a:提取音高
-    progress = _get_experiment_progress(exp_name, if_f0_enabled, version19)
-    if auto_resume8 and progress["extract_done"]:
+    # step2: v1/v2 feature extraction (V3 full-paper/local paths train from wavs directly)
+    if version19 == "v3":
         yield get_info_str(
-            i18n("step2:Pitch extraction & feature extraction")
-            + " -> skipped (features: %s/%s)"
-            % (progress["feature_count"], progress["wav_count"])
+            "Step 2: Pitch extraction & feature extraction skipped for V3 "
+            "(full_paper_mode/local_experimental use wav data directly)."
         )
     else:
-        yield get_info_str(i18n("step2:Pitch extraction & feature extraction"))
-        [
-            get_info_str(_)
-            for _ in extract_f0_feature(
-                np7,
-                f0method8,
-                if_f0_enabled,
-                exp_name,
-                version19,
-                rmvpe_workers8,
+        progress = _get_experiment_progress(exp_name, if_f0_enabled, version19)
+        if auto_resume8 and progress["extract_done"]:
+            yield get_info_str(
+                i18n("step2:Pitch extraction & feature extraction")
+                + " -> skipped (features: %s/%s)"
+                % (progress["feature_count"], progress["wav_count"])
             )
-        ]
+        else:
+            yield get_info_str(i18n("step2:Pitch extraction & feature extraction"))
+            [
+                get_info_str(_)
+                for _ in extract_f0_feature(
+                    np7,
+                    f0method8,
+                    if_f0_enabled,
+                    exp_name,
+                    version19,
+                    rmvpe_workers8,
+                )
+            ]
 
     # step3a:Train model
     yield get_info_str(i18n("Step 3a: Model training started"))
@@ -2439,6 +2466,11 @@ with gr.Blocks(title="RVC WebUI") as app:
                     value=True,
                     interactive=True,
                 )
+                clear_v3_ck = gr.Checkbox(
+                    label=i18n("Clear V3 training outputs (hqsvc_full checkpoints + train status/log files)"),
+                    value=False,
+                    interactive=True,
+                )
                 clear_resume_btn = gr.Button(
                     i18n("Clear Selected Artifacts"),
                     variant="stop",
@@ -2491,13 +2523,13 @@ with gr.Blocks(title="RVC WebUI") as app:
                     )
                     v3_preprocess_backend4 = gr.Radio(
                         label=i18n("V3 preprocess backend"),
-                        choices=["full_paper_mode", "paper_auto", "cpu_fallback", "external_yingmusic"],
+                        choices=["full_paper_mode", "paper_auto", "cpu_fallback"],
                         value="full_paper_mode",
                         interactive=True,
                     )
                     v3_train_backend19 = gr.Radio(
                         label=i18n("V3 training backend"),
-                        choices=["full_paper_mode", "local_experimental", "external", "auto"],
+                        choices=["full_paper_mode", "local_experimental", "auto"],
                         value="full_paper_mode",
                         interactive=True,
                     )
@@ -2574,12 +2606,13 @@ with gr.Blocks(title="RVC WebUI") as app:
                         [info1],
                         api_name="train_preprocess",
                     )
-            gr.Markdown(
+            step2_md = gr.Markdown(
                 value=i18n(
                     "#### 2. Feature extraction.\nUse CPU to extract pitch (if the model has pitch), use GPU to extract features (select GPU index)."
-                )
+                ),
+                visible=False,
             )
-            with gr.Row():
+            with gr.Row(visible=False) as step2_row:
                 with gr.Column():
                     gpu_info9 = gr.Textbox(
                         label=i18n("GPU Information"),
@@ -2700,7 +2733,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         maximum=10.0,
                         step=0.1,
                         label=i18n("Smart save minimum mel-loss improvement"),
-                        value=2.0,
+                        value=2,
                         interactive=True,
                     )
                     smart_save_max_mel23 = gr.Slider(
@@ -2708,7 +2741,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         maximum=100.0,
                         step=0.5,
                         label=i18n("Smart save mel-loss cap (0 disables cap)"),
-                        value=16.0,
+                        value=15,
                         interactive=True,
                     )
                     smart_save_cooldown24 = gr.Slider(
@@ -2724,7 +2757,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         maximum=500,
                         step=1,
                         label=i18n("Smart save start after (epoch/step)"),
-                        value=10,
+                        value=100,
                         interactive=True,
                     )
                     v3_train_preset_radio.change(
@@ -2758,7 +2791,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                     version19.change(
                         change_version19,
                         [sr2, if_f0_3, version19],
-                        [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row, trainset_dir4],
+                        [pretrained_G14, pretrained_D15, sr2, v3_preprocess_row, trainset_dir4, step2_md, step2_row],
                     )
                     if_f0_3.change(
                         change_f0,
@@ -2903,7 +2936,14 @@ with gr.Blocks(title="RVC WebUI") as app:
                 )
                 clear_resume_btn.click(
                     clear_experiment_artifacts,
-                    [exp_dir1, if_f0_3, version19, clear_step1_ck, clear_step2_ck],
+                    [
+                        exp_dir1,
+                        if_f0_3,
+                        version19,
+                        clear_step1_ck,
+                        clear_step2_ck,
+                        clear_v3_ck,
+                    ],
                     [resume_info8],
                 )
 
