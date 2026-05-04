@@ -84,14 +84,24 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_audio(path: Path, target_sr: int) -> np.ndarray:
-    wav, sr = sf.read(str(path), always_2d=False)
-    if wav.ndim > 1:
-        wav = wav.mean(axis=1)
-    wav = wav.astype(np.float32)
-    if sr != target_sr:
+    try:
+        wav, sr = sf.read(str(path), always_2d=False)
+        if wav.ndim > 1:
+            wav = wav.mean(axis=1)
+        wav = wav.astype(np.float32)
+        if sr != target_sr:
+            if librosa is None:
+                raise RuntimeError(
+                    "librosa is required for resampling when sample rate differs"
+                )
+            wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+    except Exception as exc:
         if librosa is None:
-            raise RuntimeError("librosa is required for resampling when sample rate differs")
-        wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+            raise RuntimeError(
+                "Failed to decode input audio with soundfile and librosa is unavailable"
+            ) from exc
+        wav, sr = librosa.load(str(path), sr=target_sr, mono=True)
+        wav = wav.astype(np.float32)
     m = np.max(np.abs(wav))
     if m > 1.0:
         wav = wav / m
