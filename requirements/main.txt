@@ -44,4 +44,7 @@ torchfcpe
 python-dotenv>=1.0.0
 av
 pybase16384
+TTS>=0.22.0
+transformers==4.46.3
+torchcodec>=0.11.1
 pytest>=7.0

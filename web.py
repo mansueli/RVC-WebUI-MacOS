@@ -18,6 +18,15 @@ from infer.lib.train.process_ckpt import (
     extract_small_model,
     merge,
 )
+from tools.web.reference_guided_tts import (
+    analyze_reference_audio,
+    generate_reference_guided_tts,
+    list_tts_backends,
+    list_tts_voice_catalog,
+    list_tts_style_presets,
+    list_xtts_languages,
+    list_tts_voices,
+)
 from i18n.i18n import I18nAuto
 from configs import Config
 from sklearn.cluster import MiniBatchKMeans
@@ -225,6 +234,55 @@ if os.path.isdir(weight_uvr5_root):
 else:
     logger.warning("UVR5 weight root does not exist: %s", weight_uvr5_root)
 
+reference_tts_voice_catalog = list_tts_voice_catalog()
+reference_tts_voice_choices = [item["label"] for item in reference_tts_voice_catalog]
+reference_tts_voice_lookup = {
+    item["label"]: item["name"] for item in reference_tts_voice_catalog
+}
+reference_tts_backend_catalog = list_tts_backends()
+reference_tts_backend_choices = [item["label"] for item in reference_tts_backend_catalog]
+reference_tts_backend_lookup = {
+    item["label"]: item["key"] for item in reference_tts_backend_catalog
+}
+reference_tts_xtts_language_catalog = list_xtts_languages()
+reference_tts_xtts_language_choices = [
+    item["label"] for item in reference_tts_xtts_language_catalog
+]
+reference_tts_xtts_language_lookup = {
+    item["label"]: item["key"] for item in reference_tts_xtts_language_catalog
+}
+reference_tts_style_catalog = list_tts_style_presets()
+reference_tts_style_choices = [item["label"] for item in reference_tts_style_catalog]
+reference_tts_style_lookup = {
+    item["label"]: item["key"] for item in reference_tts_style_catalog
+}
+reference_tts_voices = list_tts_voices()
+reference_tts_default_voice = (
+    "Samantha"
+    if "Samantha" in reference_tts_voices
+    else reference_tts_voices[0]
+)
+reference_tts_default_choice = next(
+    (
+        item["label"]
+        for item in reference_tts_voice_catalog
+        if item["name"] == reference_tts_default_voice
+    ),
+    reference_tts_voice_choices[0],
+)
+reference_tts_default_style_choice = next(
+    (item["label"] for item in reference_tts_style_catalog if item["key"] == "default"),
+    reference_tts_style_choices[0],
+)
+reference_tts_default_backend_choice = next(
+    (item["label"] for item in reference_tts_backend_catalog if item["key"] == "xtts"),
+    reference_tts_backend_choices[0],
+)
+reference_tts_default_xtts_language_choice = next(
+    (item["label"] for item in reference_tts_xtts_language_catalog if item["key"] == "pt"),
+    reference_tts_xtts_language_choices[0],
+)
+
 
 def change_choices():
     global index_paths, names
@@ -254,6 +312,60 @@ sr_dict = {
     "40k": 40000,
     "48k": 48000,
 }
+
+
+def reference_tts_analyze(reference_audio, reference_text):
+    if not reference_audio:
+        return "Please upload a reference audio file first.", None
+    try:
+        return analyze_reference_audio(reference_audio, reference_text or "")
+    except Exception:
+        logger.exception("Reference TTS analysis failed")
+        return "Reference analysis failed:\n%s" % traceback.format_exc(), None
+
+
+def reference_tts_generate(
+    reference_audio,
+    reference_text,
+    target_text,
+    backend_name,
+    voice_name,
+    style_name,
+    xtts_language_name,
+    speaking_rate,
+):
+    if not reference_audio:
+        return "Please upload a reference audio file first.", None
+    try:
+        resolved_backend_key = reference_tts_backend_lookup.get(
+            backend_name or reference_tts_default_backend_choice,
+            "xtts",
+        )
+        resolved_voice_name = reference_tts_voice_lookup.get(
+            voice_name or reference_tts_default_choice,
+            voice_name or reference_tts_default_voice,
+        )
+        resolved_style_key = reference_tts_style_lookup.get(
+            style_name or reference_tts_default_style_choice,
+            "default",
+        )
+        resolved_xtts_language_key = reference_tts_xtts_language_lookup.get(
+            xtts_language_name or reference_tts_default_xtts_language_choice,
+            "pt",
+        )
+        return generate_reference_guided_tts(
+            reference_audio,
+            reference_text or "",
+            target_text or "",
+            resolved_voice_name,
+            int(speaking_rate),
+            resolved_style_key,
+            resolved_backend_key,
+            resolved_xtts_language_key,
+        )
+    except Exception:
+        logger.exception("Reference-guided TTS generation failed")
+        return "Reference-guided TTS failed:\n%s" % traceback.format_exc(), None
 
 
 def if_done(done, p):
@@ -2379,6 +2491,102 @@ with gr.Blocks(title="RVC WebUI") as app:
                     ],
                     api_name="infer_change_voice",
                 )
+        with gr.TabItem(i18n("Reference TTS")):
+            gr.Markdown(
+                value=i18n(
+                    "Experimental reference-guided TTS. Upload a reference audio clip, review its duration and pitch statistics, enter the correct text, then generate a wav that follows the reference timing and pitch contour. XTTS uses the uploaded clip as the speaker reference, so no XTTS training is required for the initial workflow. After generation, you can optionally run the wav through an RVC model in the Model Inference tab."
+                )
+            )
+            with gr.Row():
+                with gr.Column():
+                    reference_tts_audio = gr.Audio(
+                        label=i18n("Reference audio for duration + pitch"),
+                        type="filepath",
+                    )
+                    reference_tts_text = gr.Textbox(
+                        label=i18n("Reference text / corrected transcript"),
+                        lines=5,
+                        placeholder=i18n("Enter the exact text spoken or sung in the reference audio"),
+                    )
+                    reference_tts_target_text = gr.Textbox(
+                        label=i18n("Target text to synthesize (leave blank to reuse reference text)"),
+                        lines=5,
+                        placeholder=i18n("Optional new text. Leave blank to synthesize the reference transcript."),
+                    )
+                with gr.Column():
+                    reference_tts_backend = gr.Dropdown(
+                        label=i18n("TTS backend"),
+                        choices=reference_tts_backend_choices,
+                        value=reference_tts_default_backend_choice,
+                        interactive=True,
+                    )
+                    reference_tts_voice = gr.Dropdown(
+                        label=i18n("System TTS voice (used only by macOS backend)"),
+                        choices=reference_tts_voice_choices,
+                        value=reference_tts_default_choice,
+                        interactive=True,
+                    )
+                    reference_tts_xtts_language = gr.Dropdown(
+                        label=i18n("XTTS language"),
+                        choices=reference_tts_xtts_language_choices,
+                        value=reference_tts_default_xtts_language_choice,
+                        interactive=True,
+                    )
+                    reference_tts_style = gr.Dropdown(
+                        label=i18n("Voice style preset"),
+                        choices=reference_tts_style_choices,
+                        value=reference_tts_default_style_choice,
+                        interactive=True,
+                    )
+                    reference_tts_rate = gr.Slider(
+                        minimum=120,
+                        maximum=260,
+                        step=5,
+                        label=i18n("Base TTS speaking rate"),
+                        value=185,
+                        interactive=True,
+                    )
+                    reference_tts_analyze_btn = gr.Button(
+                        i18n("Analyze reference"),
+                        variant="secondary",
+                    )
+                    reference_tts_generate_btn = gr.Button(
+                        i18n("Generate reference-guided wav"),
+                        variant="primary",
+                    )
+                    reference_tts_analysis_file = gr.File(
+                        label=i18n("Pitch / duration analysis JSON"),
+                    )
+            with gr.Row():
+                reference_tts_info = gr.Textbox(
+                    label=i18n("Reference TTS status"),
+                    lines=12,
+                )
+                reference_tts_output = gr.Audio(
+                    label=i18n("Generated wav"),
+                )
+
+            reference_tts_analyze_btn.click(
+                reference_tts_analyze,
+                [reference_tts_audio, reference_tts_text],
+                [reference_tts_info, reference_tts_analysis_file],
+                api_name="reference_tts_analyze",
+            )
+            reference_tts_generate_btn.click(
+                reference_tts_generate,
+                [
+                    reference_tts_audio,
+                    reference_tts_text,
+                    reference_tts_target_text,
+                    reference_tts_backend,
+                    reference_tts_voice,
+                    reference_tts_style,
+                    reference_tts_xtts_language,
+                    reference_tts_rate,
+                ],
+                [reference_tts_info, reference_tts_output],
+                api_name="reference_tts_generate",
+            )
         with gr.TabItem(
             i18n("Vocals/Accompaniment Separation & Reverberation Removal")
         ):
